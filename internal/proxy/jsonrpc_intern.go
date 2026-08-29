@@ -232,7 +232,7 @@ func (p *Proxy) keyLogin(w http.ResponseWriter, r *http.Request, school string, 
 
 	s := p.sessions.New(auth.User, info.ClassID)
 	p.setSessionCookies(w, s.ID, school)
-	rewritten := p.markPooledElementsDisplayable(realBody)
+	rewritten := p.markPooledElementsDisplayable(realBody, auth.User)
 	p.mdJSONMu.Lock()
 	p.mdJSON = rewritten
 	p.mdJSONMu.Unlock()
@@ -241,11 +241,11 @@ func (p *Proxy) keyLogin(w http.ResponseWriter, r *http.Request, school string, 
 }
 
 // markPooledElementsDisplayable rewrites the masterData lists in a
-// getUserData2017 response so pooled classes are displayable and teachers/rooms
-// that appear in pooled timetables are displayAllowed. The real server only
-// marks the user's own class and hides everything else; the shared pool should
-// expose all pooled classes plus any teacher/room/subject we can reconstruct.
-func (p *Proxy) markPooledElementsDisplayable(body []byte) []byte {
+// getUserData2017 response so pooled classes are displayable and teachers/rooms/
+// subjects the requesting user is allowed to reconstruct are displayAllowed.
+// Element reconstruction access is granted per type (TEACHER/ROOM/SUBJECT) via
+// a per-user override or the global switch; un-granted types stay hidden.
+func (p *Proxy) markPooledElementsDisplayable(body []byte, username string) []byte {
 	var resp struct {
 		Result struct {
 			MasterData struct {
@@ -305,9 +305,20 @@ func (p *Proxy) markPooledElementsDisplayable(body []byte) []byte {
 		}
 	}
 	setDisplayable("klassen", func(id int64) bool { return pooled[id] }, "displayable")
-	setDisplayable("teachers", func(id int64) bool { return p.recon.has("TEACHER", id) }, "displayAllowed")
-	setDisplayable("rooms", func(id int64) bool { return p.recon.has("ROOM", id) }, "displayAllowed")
-	setDisplayable("subjects", func(id int64) bool { return p.recon.has("SUBJECT", id) }, "displayAllowed")
+	can := map[string]bool{}
+	for _, t := range []string{"TEACHER", "ROOM", "SUBJECT"} {
+		ok, _ := p.store.ReconAccess(username, t)
+		can[t] = ok
+	}
+	setDisplayable("teachers", func(id int64) bool {
+		return can["TEACHER"] && p.recon.has("TEACHER", id)
+	}, "displayAllowed")
+	setDisplayable("rooms", func(id int64) bool {
+		return can["ROOM"] && p.recon.has("ROOM", id)
+	}, "displayAllowed")
+	setDisplayable("subjects", func(id int64) bool {
+		return can["SUBJECT"] && p.recon.has("SUBJECT", id)
+	}, "displayAllowed")
 
 	out, err := json.Marshal(m)
 	if err != nil {
@@ -447,9 +458,9 @@ func (p *Proxy) serveElementTimetable(w http.ResponseWriter, r *http.Request, sc
 		p.writeJSONRPCError(w, id, "not logged in", -8520)
 		return
 	}
-	// Reconstructed teacher/room/subject timetables are gated behind a per-user
-	// feature flag; nothing is enabled until granted explicitly.
-	allowed, _ := p.store.FeatureEnabled(requester.Username, "recon")
+	// Reconstructed teacher/room/subject timetables are gated per element type
+	// (individual override or global switch); nothing is enabled by default.
+	allowed, _ := p.store.ReconAccess(requester.Username, pr.Type)
 	if !allowed {
 		p.writeJSONRPCError(w, id, "no right for timetable", -8509)
 		return

@@ -178,33 +178,64 @@ func (s *Store) GetSecret(username string) (string, error) {
 	return sec, err
 }
 
-// FeatureEnabled reports whether a user is allowed to use a named feature.
-// Default is deny: access must be granted explicitly.
-func (s *Store) FeatureEnabled(username, feature string) (bool, error) {
-	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM perms WHERE username=? AND feature=? AND allowed=1`,
-		username, feature).Scan(&n)
-	if err != nil {
-		return false, err
+// globalPermUser is the special perms row username holding the global switch
+// for a reconstruction element type. Per-user rows override it.
+const globalPermUser = "*"
+
+// ReconAccess reports whether a user may use a reconstruction element type
+// (one of TEACHER/ROOM/SUBJECT). A per-user override wins if one exists;
+// otherwise the global switch for the type applies; default is deny.
+func (s *Store) ReconAccess(username, elType string) (bool, error) {
+	var v int
+	row := s.db.QueryRow(`SELECT allowed FROM perms WHERE username=? AND feature=?`, username, elType)
+	if err := row.Scan(&v); err == nil {
+		return v != 0, nil
 	}
-	return n > 0, nil
+	row = s.db.QueryRow(`SELECT allowed FROM perms WHERE username=? AND feature=?`, globalPermUser, elType)
+	if err := row.Scan(&v); err == nil {
+		return v != 0, nil
+	}
+	return false, nil
 }
 
-// SetFeature grants or revokes a named feature for a user.
-func (s *Store) SetFeature(username, feature string, allowed bool) error {
+// SetReconType sets the global switch for an element type across all users.
+func (s *Store) SetReconType(elType string, allowed bool) error {
+	return s.setPerm(globalPermUser, elType, allowed)
+}
+
+// SetReconOverride grants or revokes a reconstruction element type for a
+// single user, taking precedence over the global switch.
+func (s *Store) SetReconOverride(username, elType string, allowed bool) error {
+	return s.setPerm(username, elType, allowed)
+}
+
+func (s *Store) setPerm(username, elType string, allowed bool) error {
 	v := 0
 	if allowed {
 		v = 1
 	}
 	_, err := s.db.Exec(`INSERT INTO perms (username, feature, allowed) VALUES (?,?,?)
 		ON CONFLICT(username, feature) DO UPDATE SET allowed=excluded.allowed`,
-		username, feature, v)
+		username, elType, v)
 	return err
 }
 
-// RevokeAll removes all grants for a feature across every user.
+// ClearReconOverrides removes any per-user reconstruction overrides for a
+// username so they fall back to the global switches again.
+func (s *Store) ClearReconOverrides(username string) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM perms WHERE username=? AND username<>?`,
+		username, globalPermUser)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// RevokeAll clears every permission row (global switches and per-user
+// overrides), returning every user to the default state of class-pool-only.
 func (s *Store) RevokeAll() (int64, error) {
-	res, err := s.db.Exec(`DELETE FROM perms WHERE feature=? AND allowed=1`, "recon")
+	res, err := s.db.Exec(`DELETE FROM perms`)
 	if err != nil {
 		return 0, err
 	}

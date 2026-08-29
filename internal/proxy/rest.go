@@ -66,7 +66,8 @@ func (p *Proxy) restWeeklyTimetable(w http.ResponseWriter, r *http.Request, scho
 
 	switch elType {
 	case "2", "3", "4": // teacher, subject, room: reconstructed from pooled data
-		allowed, _ := p.store.FeatureEnabled(user.Username, "recon")
+		reconType := map[string]string{"2": "TEACHER", "3": "SUBJECT", "4": "ROOM"}[elType]
+		allowed, _ := p.store.ReconAccess(user.Username, reconType)
 		if !allowed {
 			p.forbidden(w)
 			return

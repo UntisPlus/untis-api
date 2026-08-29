@@ -8,12 +8,28 @@ import (
 	"untis-proxy/internal/store"
 )
 
+// types is the set of reconstruction element types that can be granted, plus
+// the lowercase aliases used on the command line.
+var typeAliases = map[string]string{
+	"teacher":  "TEACHER",
+	"room":     "ROOM",
+	"subject":  "SUBJECT",
+	"class":    "CLASS",
+	"student":  "STUDENT",
+	"teachers": "TEACHER",
+	"rooms":    "ROOM",
+	"subjects": "SUBJECT",
+}
+
 func main() {
 	db := flag.String("db", "untis.db", "sqlite database path")
-	username := flag.String("user", "", "username to grant/revoke access for")
-	all := flag.Bool("all", false, "apply to every user (revoke only)")
-	grant := flag.Bool("grant", false, "grant the feature")
-	revoke := flag.Bool("revoke", false, "revoke the feature")
+	username := flag.String("user", "", "username to grant/override access for (omit with -global)")
+	global := flag.Bool("global", false, "operate on the global switch that applies to all users")
+	elType := flag.String("type", "all", "element type: teacher|room|subject|all (case-insensitive)")
+	grant := flag.Bool("grant", false, "grant the type")
+	revoke := flag.Bool("revoke", false, "revoke the type")
+	clear := flag.Bool("clear", false, "clear all per-user overrides for -user (fall back to global)")
+	all := flag.Bool("all", false, "apply to every user (revoke/clear only)")
 	flag.Parse()
 
 	st, err := store.Open(*db)
@@ -22,32 +38,77 @@ func main() {
 	}
 	defer st.Close()
 
+	types := resolveTypes(*elType)
+
+	// --all --revoke: wipe everything to the first-login (class-pool-only) state.
 	if *all {
-		if *grant {
-			log.Fatal("--all can only be used with --revoke")
+		if *grant || *username != "" {
+			log.Fatal("--all can only be combined with --revoke (no --user/--grant)")
 		}
 		n, err := st.RevokeAll()
 		if err != nil {
 			log.Fatalf("revoke all: %v", err)
 		}
-		fmt.Printf("revoked recon access for %d user(s)\n", n)
+		fmt.Printf("cleared all permissions for all users (%d rows): class-pool-only default restored\n", n)
 		return
 	}
-	if *username == "" {
-		log.Fatal("--user is required (or use --all --revoke)")
+
+	// --user X --clear: drop the user's overrides, fall back to global switches.
+	if *clear {
+		if *username == "" {
+			log.Fatal("--clear requires --user")
+		}
+		if *grant || *revoke {
+			log.Fatal("--clear cannot be combined with --grant/--revoke")
+		}
+		n, err := st.ClearReconOverrides(*username)
+		if err != nil {
+			log.Fatalf("clear overrides: %v", err)
+		}
+		fmt.Printf("cleared %d per-user override(s) for %q (falls back to global switches)\n", n, *username)
+		return
+	}
+
+	if *username == "" && !*global {
+		log.Fatal("require --user (per-user override) or --global (global switch)")
+	}
+	if *username != "" && *global {
+		log.Fatal("choose either --user (per-user override) or --global (global switch), not both")
 	}
 	if *grant == *revoke {
 		log.Fatal("exactly one of --grant or --revoke is required")
 	}
 
 	allowed := *grant
-	if err := st.SetFeature(*username, "recon", allowed); err != nil {
-		log.Fatalf("set feature: %v", err)
+	for _, t := range types {
+		var err error
+		if *global {
+			err = st.SetReconType(t, allowed)
+		} else {
+			err = st.SetReconOverride(*username, t, allowed)
+		}
+		if err != nil {
+			log.Fatalf("set %s: %v", t, err)
+		}
+		on, _ := st.ReconAccess(*username, t)
+		fmt.Printf("%s reconstruction %s (effective for %q = %v)\n", t, verb(allowed), *username, on)
 	}
-	action := "revoked"
+}
+
+func resolveTypes(s string) []string {
+	if s == "all" {
+		return []string{"TEACHER", "ROOM", "SUBJECT"}
+	}
+	if t, ok := typeAliases[s]; ok {
+		return []string{t}
+	}
+	log.Fatalf("unknown type %q (use teacher|room|subject|all)", s)
+	return nil
+}
+
+func verb(allowed bool) string {
 	if allowed {
-		action = "granted"
+		return "granted"
 	}
-	on, _ := st.FeatureEnabled(*username, "recon")
-	fmt.Printf("recon access for %q %s (now enabled=%v)\n", *username, action, on)
+	return "revoked"
 }
