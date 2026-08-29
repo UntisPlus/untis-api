@@ -10,7 +10,8 @@ COPY internal/ ./internal/
 
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/untis-server ./cmd/server && \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/untis-seed ./cmd/seed && \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/untis-perm ./cmd/perm
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/untis-perm ./cmd/perm && \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/untisctl ./cmd/untisctl
 
 # ---- runtime stage ----
 FROM alpine:3.20

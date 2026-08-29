@@ -243,6 +243,35 @@ func (s *Store) RevokeAll() (int64, error) {
 	return n, nil
 }
 
+// PermRow is a single row in the perms table.
+type PermRow struct {
+	Username string
+	Feature  string
+	Allowed  bool
+}
+
+// AllPerms returns every permission row, global switches (username "*")
+// first, then per-user overrides.
+func (s *Store) AllPerms() ([]PermRow, error) {
+	rows, err := s.db.Query(`SELECT username, feature, allowed FROM perms
+		ORDER BY username='*' DESC, username, feature`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PermRow
+	for rows.Next() {
+		var p PermRow
+		var a int
+		if err := rows.Scan(&p.Username, &p.Feature, &a); err != nil {
+			return nil, err
+		}
+		p.Allowed = a != 0
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // SaveReconElements replaces the persisted teacher/room/subject set with the
 // given types->id map. It is written on shutdown so a later boot can answer
 // reconstruction requests before the background scan revalidates.
@@ -388,6 +417,69 @@ func (s *Store) AnyUser() (*User, error) {
 		FROM users ORDER BY last_seen DESC, id DESC LIMIT 1`))
 }
 
+// ListUsers returns every account, most recently seen first.
+func (s *Store) ListUsers() ([]*User, error) {
+	rows, err := s.db.Query(`SELECT id,username,password,method,person_id,person_type,class_id,class_name,email,display_name,created_at,last_seen
+		FROM users ORDER BY last_seen DESC, id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*User
+	for rows.Next() {
+		u, err := s.scanUserRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// DeleteUser removes an account plus its secret, per-user permission overrides
+// and any personal calendar tokens bound to that person. Global switches are
+// untouched.
+func (s *Store) DeleteUser(username string) (int64, error) {
+	u, err := s.GetUser(username)
+	if err != nil {
+		return 0, err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	n := int64(0)
+	var del func(q string, args ...any) error
+	del = func(q string, args ...any) error {
+		res, err := tx.Exec(q, args...)
+		if err != nil {
+			return err
+		}
+		c, _ := res.RowsAffected()
+		n += c
+		return nil
+	}
+	if err := del(`DELETE FROM users WHERE username=?`, username); err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	if err := del(`DELETE FROM secrets WHERE username=?`, username); err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	if err := del(`DELETE FROM perms WHERE username=? AND username<>?`, username, globalPermUser); err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	if u != nil && u.PersonID > 0 {
+		if err := del(`DELETE FROM class_tokens WHERE person_id=? AND class_id=0`, u.PersonID); err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+	}
+	return n, tx.Commit()
+}
+
 func (s *Store) scanUser(row *sql.Row) (*User, error) {
 	var u User
 	var ca, ls int64
@@ -396,6 +488,20 @@ func (s *Store) scanUser(row *sql.Row) (*User, error) {
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
+	if err != nil {
+		return nil, err
+	}
+	u.CreatedAt = time.Unix(ca, 0)
+	u.LastSeen = time.Unix(ls, 0)
+	return &u, nil
+}
+
+// scanUserRow is the *sql.Rows equivalent of scanUser.
+func (s *Store) scanUserRow(row *sql.Rows) (*User, error) {
+	var u User
+	var ca, ls int64
+	err := row.Scan(&u.ID, &u.Username, &u.Password, &u.Method, &u.PersonID, &u.PersonType,
+		&u.ClassID, &u.ClassName, &u.Email, &u.DisplayName, &ca, &ls)
 	if err != nil {
 		return nil, err
 	}
@@ -437,6 +543,35 @@ func (s *Store) scanClassToken(row *sql.Row) (*ClassToken, error) {
 		return nil, err
 	}
 	return &t, nil
+}
+
+// ListClassTokens returns every calendar subscription token, newest first.
+func (s *Store) ListClassTokens() ([]*ClassToken, error) {
+	rows, err := s.db.Query(`SELECT token, school, class_id, person_id, created_at, last_access
+		FROM class_tokens ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*ClassToken
+	for rows.Next() {
+		var t ClassToken
+		if err := rows.Scan(&t.Token, &t.School, &t.ClassID, &t.PersonID, &t.CreatedAt, &t.LastAccess); err != nil {
+			return nil, err
+		}
+		out = append(out, &t)
+	}
+	return out, rows.Err()
+}
+
+// DeleteClassToken removes a calendar subscription token by its value.
+func (s *Store) DeleteClassToken(token string) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM class_tokens WHERE token=?`, token)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // TouchClassToken updates the last-access timestamp of an existing token.
