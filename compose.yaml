@@ -1,0 +1,29 @@
+services:
+  untis-proxy:
+    build: .
+    image: untis-proxy:latest
+    container_name: untis-proxy
+    restart: unless-stopped
+    ports:
+      - "8509:8509"
+    environment:
+      UNTIS_ADDR: ":8509"
+      UNTIS_SERVER: "schuldorf.webuntis.com"
+      UNTIS_SCHOOL: "schuldorf"
+      UNTIS_YEAR_START: "2026-08-10"
+      UNTIS_YEAR_END: "2027-06-27"
+    volumes:
+      - ./data:/data
+    labels:
+      - dockflare.enable=true
+      - dockflare.hostname=api-untis.deelabs.tech
+      - dockflare.service=http://untis-proxy:8509
+    networks:
+      - cloudflare-net
+      - npm_network
+
+networks:
+  cloudflare-net:
+    external: true
+  npm_network:
+    external: true

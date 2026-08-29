@@ -1,0 +1,360 @@
+package untis
+
+import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/base32"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+)
+
+var (
+	ErrNoRight       = errors.New("no right for timetable")
+	ErrNotFound      = errors.New("method not found")
+	ErrNotLoggedIn   = errors.New("not logged in")
+	ErrBadCreds      = errors.New("bad credentials")
+	ErrUnknownMethod = errors.New("unknown method")
+)
+
+// UpstreamError carries the real error code/message so the proxy can mirror it.
+type UpstreamError struct {
+	Code    int
+	Message string
+	Raw     []byte
+}
+
+func (e *UpstreamError) Error() string {
+	return fmt.Sprintf("upstream error %d: %s", e.Code, e.Message)
+}
+
+type Config struct {
+	Server     string // e.g. schuldorf.webuntis.com
+	School     string
+	HTTPClient *http.Client
+}
+
+type cachedSession struct {
+	cookie  string
+	expires time.Time
+}
+
+type Client struct {
+	cfg      Config
+	hc       *http.Client
+	mu       sync.Mutex
+	sessions map[string]cachedSession // username -> real session cookie
+}
+
+func New(cfg Config) *Client {
+	if cfg.HTTPClient == nil {
+		cfg.HTTPClient = &http.Client{Timeout: 25 * time.Second}
+	}
+	return &Client{cfg: cfg, hc: cfg.HTTPClient, sessions: make(map[string]cachedSession)}
+}
+
+// TOTP computes a RFC6238 time-based one-time password from a base32 secret.
+func TOTP(secret string) string {
+	key, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(secret))
+	if err != nil {
+		key, err = base32.StdEncoding.DecodeString(strings.ToUpper(secret))
+		if err != nil {
+			return "000000"
+		}
+	}
+	counter := uint64(time.Now().Unix() / 30)
+	var msg [8]byte
+	binary.BigEndian.PutUint64(msg[:], counter)
+	mac := hmac.New(sha1.New, key)
+	mac.Write(msg[:])
+	sum := mac.Sum(nil)
+	off := sum[len(sum)-1] & 0x0f
+	code := binary.BigEndian.Uint32(sum[off:off+4]) & 0x7fffffff
+	return fmt.Sprintf("%06d", code%1000000)
+}
+
+func (c *Client) base(school string) string {
+	if school == "" {
+		school = c.cfg.School
+	}
+	return "https://" + c.cfg.Server
+}
+
+func (c *Client) schoolCookie(school string) string {
+	if school == "" {
+		school = c.cfg.School
+	}
+	return "_" + base64.StdEncoding.EncodeToString([]byte(school))
+}
+
+func cookieHeader(cookie string) http.Header {
+	h := http.Header{}
+	if cookie != "" {
+		h.Set("Cookie", cookie)
+	}
+	return h
+}
+
+func (c *Client) post(url string, hdr http.Header, body []byte) ([]byte, int, http.Header, error) {
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) untis-proxy/1.0")
+	for k, vs := range hdr {
+		for _, v := range vs {
+			req.Header.Set(k, v)
+		}
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	return b, resp.StatusCode, resp.Header, err
+}
+
+func (c *Client) get(url string, hdr http.Header) ([]byte, int, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) untis-proxy/1.0")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	for k, vs := range hdr {
+		for _, v := range vs {
+			req.Header.Set(k, v)
+		}
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	return b, resp.StatusCode, err
+}
+
+// JSONRPC forwards a raw JSON-RPC request to the real server and returns the raw body.
+func (c *Client) JSONRPC(school, cookie string, body []byte) ([]byte, error) {
+	b, code, _, err := c.post(c.base(school)+"/WebUntis/jsonrpc.do?school="+school, cookieHeader(cookie), body)
+	if err != nil {
+		return nil, err
+	}
+	if code != http.StatusOK {
+		return nil, fmt.Errorf("upstream status %d", code)
+	}
+	return b, nil
+}
+
+// PasswordLogin authenticates against the real server, returning the real
+// session cookie and the parsed authenticate result.
+func (c *Client) PasswordLogin(school, username, password, client string) (string, map[string]any, error) {
+	body, _ := json.Marshal(map[string]any{
+		"id": "upstream", "jsonrpc": "2.0", "method": "authenticate",
+		"params": map[string]any{"user": username, "password": password, "client": client},
+	})
+	b, _, _, err := c.post(c.base(school)+"/WebUntis/jsonrpc.do?school="+school, nil, body)
+	if err != nil {
+		return "", nil, err
+	}
+	var res struct {
+		Result map[string]any `json:"result"`
+		Error  *UpstreamError `json:"error"`
+	}
+	if err := json.Unmarshal(b, &res); err != nil {
+		return "", nil, fmt.Errorf("bad upstream response: %w", err)
+	}
+	if res.Error != nil {
+		res.Error.Raw = b
+		return "", nil, res.Error
+	}
+	sid, _ := res.Result["sessionId"].(string)
+	if sid == "" {
+		return "", nil, &UpstreamError{Message: "bad credentials", Code: -8504, Raw: b}
+	}
+	return c.buildCookie(sid, school), res.Result, nil
+}
+
+// KeyLogin performs OTP-based login against the real server. extraAuth may carry
+// non-standard fields (e.g. "key": secret) to allow replaying later.
+func (c *Client) KeyLogin(school, username, otp string, clientTime int64, extraAuth map[string]any) (string, []byte, error) {
+	auth := map[string]any{"clientTime": clientTime, "user": username, "otp": otp}
+	for k, v := range extraAuth {
+		auth[k] = v
+	}
+	body, _ := json.Marshal(map[string]any{
+		"id": "upstream", "jsonrpc": "2.0", "method": "getUserData2017",
+		"params": []any{map[string]any{"auth": auth}},
+	})
+	url := c.base(school) + "/WebUntis/jsonrpc_intern.do?m=getUserData2017&school=" + school + "&v=i2.2"
+	b, _, hdr, err := c.post(url, nil, body)
+	if err != nil {
+		return "", nil, err
+	}
+	cookie := extractJSESSIONID(hdr)
+	if cookie == "" {
+		var e struct {
+			Error *UpstreamError `json:"error"`
+		}
+		_ = json.Unmarshal(b, &e)
+		if e.Error != nil {
+			e.Error.Raw = b
+			return "", nil, e.Error
+		}
+		return "", nil, &UpstreamError{Message: "bad credentials", Code: -8504, Raw: b}
+	}
+	return cookie + "; schoolname=" + c.schoolCookie(school), b, nil
+}
+
+// Logout terminates a real session.
+func (c *Client) Logout(school, cookie string) {
+	body := []byte(`{"id":"upstream","jsonrpc":"2.0","method":"logout","params":{}}`)
+	_, _, _, _ = c.post(c.base(school)+"/WebUntis/jsonrpc.do?school="+school, cookieHeader(cookie), body)
+}
+
+// Session returns a valid real session cookie for a user, caching it briefly.
+func (c *Client) Session(school, username, secret, method string) (string, error) {
+	ck := username + "|" + method
+	c.mu.Lock()
+	if cs, ok := c.sessions[ck]; ok && time.Now().Before(cs.expires) {
+		c.mu.Unlock()
+		return cs.cookie, nil
+	}
+	c.mu.Unlock()
+
+	var cookie string
+	var err error
+	switch method {
+	case "key":
+		if secret == "" {
+			return "", fmt.Errorf("user %s has no replayable key", username)
+		}
+		cookie, _, err = c.KeyLogin(school, username, TOTP(secret), time.Now().UnixMilli(), nil)
+	default:
+		cookie, _, err = c.PasswordLogin(school, username, secret, "untis-proxy")
+	}
+	if err != nil {
+		return "", err
+	}
+	c.mu.Lock()
+	c.sessions[ck] = cachedSession{cookie: cookie, expires: time.Now().Add(8 * time.Minute)}
+	c.mu.Unlock()
+	return cookie, nil
+}
+
+type PersonInfo struct {
+	PersonID    int64
+	PersonType  int64
+	ClassID     int64
+	ClassName   string
+	Email       string
+	DisplayName string
+}
+
+// PersonInfo fetches identity/class data for a real session.
+func (c *Client) PersonInfo(school, cookie string) (*PersonInfo, error) {
+	info := &PersonInfo{}
+	// /api/app/config
+	b, status, err := c.get(c.base(school)+"/WebUntis/api/app/config", cookieHeader(cookie))
+	if err == nil && status == http.StatusOK {
+		var cfg struct {
+			Data struct {
+				LoginServiceConfig struct {
+					User struct {
+						PersonID int64 `json:"personId"`
+						Persons  []struct {
+							ID          int64  `json:"id"`
+							Type        int64  `json:"type"`
+							DisplayName string `json:"displayName"`
+						} `json:"persons"`
+						Email string `json:"email"`
+					} `json:"user"`
+				} `json:"loginServiceConfig"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(b, &cfg) == nil {
+			info.PersonID = cfg.Data.LoginServiceConfig.User.PersonID
+			info.Email = cfg.Data.LoginServiceConfig.User.Email
+			if len(cfg.Data.LoginServiceConfig.User.Persons) > 0 {
+				p := cfg.Data.LoginServiceConfig.User.Persons[0]
+				info.PersonType = p.Type
+				if info.PersonID == 0 {
+					info.PersonID = p.ID
+				}
+				info.DisplayName = p.DisplayName
+			}
+		}
+	}
+	// /api/daytimetable/config
+	b, status, err = c.get(c.base(school)+"/WebUntis/api/daytimetable/config", cookieHeader(cookie))
+	if err == nil && status == http.StatusOK {
+		var cfg struct {
+			Data struct {
+				KlasseID int64 `json:"klasseId"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(b, &cfg) == nil {
+			info.ClassID = cfg.Data.KlasseID
+		}
+	}
+	return info, nil
+}
+
+// GetKlassen returns the raw getKlassen result list.
+func (c *Client) GetKlassen(school, cookie string) ([]byte, error) {
+	body := []byte(`{"id":"upstream","jsonrpc":"2.0","method":"getKlassen","params":{}}`)
+	return c.JSONRPC(school, cookie, body)
+}
+
+// RESTGet forwards a GET request to the real REST API.
+func (c *Client) RESTGet(school, cookie, path, rawQuery string) ([]byte, int, error) {
+	u := c.base(school) + path
+	if rawQuery != "" {
+		u += "?" + rawQuery
+	}
+	return c.get(u, cookieHeader(cookie))
+}
+
+// RESTGetToken fetches a REST endpoint using a Bearer token instead of a
+// session cookie.
+func (c *Client) RESTGetToken(school, token, path, rawQuery string) ([]byte, int, error) {
+	u := c.base(school) + path
+	if rawQuery != "" {
+		u += "?" + rawQuery
+	}
+	hdr := make(http.Header)
+	hdr.Set("Authorization", token)
+	return c.get(u, hdr)
+}
+
+// RawIntern forwards a raw body to jsonrpc_intern.do.
+func (c *Client) RawIntern(school, cookie, method string, body []byte) ([]byte, int, http.Header, error) {
+	u := c.base(school) + "/WebUntis/jsonrpc_intern.do?m=" + method + "&school=" + school + "&v=i2.2"
+	return c.post(u, cookieHeader(cookie), body)
+}
+
+func (c *Client) buildCookie(sid, school string) string {
+	return "JSESSIONID=" + sid + "; schoolname=" + c.schoolCookie(school)
+}
+
+func extractJSESSIONID(hdr http.Header) string {
+	for _, ck := range hdr.Values("Set-Cookie") {
+		if m := regexp.MustCompile(`JSESSIONID=([^;]+)`).FindStringSubmatch(ck); m != nil {
+			return "JSESSIONID=" + m[1]
+		}
+	}
+	return ""
+}

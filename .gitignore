@@ -1,0 +1,15 @@
+# runtime data
+data/
+*.db
+*.db-*
+
+# Let's Encrypt keys / certs
+le/
+
+# build artifacts & logs
+bin/
+*.log
+
+# secrets
+credentials.txt
+.tunnel-token
