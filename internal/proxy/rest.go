@@ -77,6 +77,13 @@ func (p *Proxy) restWeeklyTimetable(w http.ResponseWriter, r *http.Request, scho
 		p.forbidden(w)
 		return
 	}
+
+	// god-api: serve raw from saved teacher accounts
+	if p.isGod(user.Username) {
+		p.serveRESTRawFromGodSource(w, r, school)
+		return
+	}
+
 	q := r.URL.Query()
 	elType := q.Get("elementType")
 	elID, _ := strconv.ParseInt(q.Get("elementId"), 10, 64)
@@ -126,6 +133,30 @@ func (p *Proxy) restWeeklyTimetable(w http.ResponseWriter, r *http.Request, scho
 		w.WriteHeader(status)
 		_, _ = w.Write(b)
 	}
+}
+
+// serveRESTRawFromGodSource serves the weekly timetable REST endpoint raw
+// from the saved teacher accounts when the requester holds the god-api permission.
+func (p *Proxy) serveRESTRawFromGodSource(w http.ResponseWriter, r *http.Request, school string) {
+	sources, err := p.store.GodSourceAccounts()
+	if err != nil || len(sources) == 0 {
+		p.forbidden(w)
+		return
+	}
+	owner := sources[0]
+	cookie, err := p.untis.Session(school, owner.Username, owner.Password, owner.Method)
+	if err != nil {
+		p.forbidden(w)
+		return
+	}
+	b, status, err := p.untis.RESTGet(school, cookie, r.URL.Path, r.URL.RawQuery)
+	if err != nil {
+		p.forbidden(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(b)
 }
 
 func (p *Proxy) restPoolOwner(school string, classID int64) (*store.User, error) {

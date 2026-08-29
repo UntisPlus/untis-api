@@ -471,6 +471,27 @@ func (s *Store) OwnerForClass(classID int64) (*User, error) {
 		FROM users WHERE class_id=? AND password<>'' ORDER BY last_seen DESC, id DESC LIMIT 1`, classID))
 }
 
+// GodSourceAccounts returns all users with replayable secrets (password <> '')
+// who are non-students (person_type != 5). These are the "teacher accounts
+// lying around" that a god-api user draws raw data from.
+func (s *Store) GodSourceAccounts() ([]*User, error) {
+	rows, err := s.db.Query(`SELECT id,username,password,method,person_id,person_type,class_id,class_name,email,display_name,created_at,last_seen
+		FROM users WHERE password<>'' AND person_type<>5 ORDER BY last_seen DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*User
+	for rows.Next() {
+		u, err := s.scanUserRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) AnyUser() (*User, error) {
 	return s.scanUser(s.db.QueryRow(`SELECT id,username,password,method,person_id,person_type,class_id,class_name,email,display_name,created_at,last_seen
 		FROM users ORDER BY last_seen DESC, id DESC LIMIT 1`))

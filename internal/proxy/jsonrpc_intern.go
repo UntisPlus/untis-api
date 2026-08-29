@@ -405,6 +405,12 @@ func (p *Proxy) getTimetable2017(w http.ResponseWriter, r *http.Request, school 
 		return
 	}
 
+	// god-api: serve everything raw from saved teacher accounts
+	if p.isGod(requesterName) {
+		p.serveRawFromGodSource(w, r, school, id, body)
+		return
+	}
+
 	classID := int64(0)
 	switch pr.Type {
 	case "STUDENT":
@@ -460,6 +466,33 @@ func (p *Proxy) getTimetable2017(w http.ResponseWriter, r *http.Request, school 
 			p.writeJSONRPCError(w, id, "no right for timetable", -8509)
 			return
 		}
+	}
+	b, status, _, err := p.untis.RawIntern(school, "", "getTimetable2017", newBody)
+	if err != nil {
+		p.writeJSONRPCError(w, id, "no right for timetable", -8509)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(b)
+}
+
+// serveRawFromGodSource serves timetable requests (CLASS/STUDENT/TEACHER/ROOM/SUBJECT)
+// raw from the saved teacher accounts when the requester holds the god-api permission.
+// It picks the first available god source account and forwards the request with
+// rewritten auth to that account.
+func (p *Proxy) serveRawFromGodSource(w http.ResponseWriter, r *http.Request, school string, id json.RawMessage, body []byte) {
+	sources, err := p.store.GodSourceAccounts()
+	if err != nil || len(sources) == 0 {
+		p.writeJSONRPCError(w, id, "no god source accounts available", -8509)
+		return
+	}
+	// Use the most recent god source account (first in list)
+	owner := sources[0]
+	newBody, err := p.rewriteAuthForOwner(school, body, owner)
+	if err != nil {
+		p.writeJSONRPCError(w, id, "no right for timetable", -8509)
+		return
 	}
 	b, status, _, err := p.untis.RawIntern(school, "", "getTimetable2017", newBody)
 	if err != nil {
