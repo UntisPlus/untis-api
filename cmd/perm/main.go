@@ -11,21 +11,32 @@ import (
 // types is the set of reconstruction element types that can be granted, plus
 // the lowercase aliases used on the command line.
 var typeAliases = map[string]string{
-	"teacher":  "TEACHER",
-	"room":     "ROOM",
-	"subject":  "SUBJECT",
-	"class":    "CLASS",
-	"student":  "STUDENT",
-	"teachers": "TEACHER",
-	"rooms":    "ROOM",
-	"subjects": "SUBJECT",
+	"teacher":      "TEACHER",
+	"room":         "ROOM",
+	"subject":      "SUBJECT",
+	"class":        "CLASS",
+	"student":      "STUDENT",
+	"teachers":     "TEACHER",
+	"rooms":        "ROOM",
+	"subjects":     "SUBJECT",
+	"god-api":      "god-api",
+	"godapi":       "god-api",
+	"god-api-editor": "god-api-editor",
+	"godeditor":    "god-api-editor",
+	"godapi-editor": "god-api-editor",
+}
+
+// godFeatures are per-user-only and cannot be applied via the global switch.
+var godFeatures = map[string]bool{
+	"god-api":       true,
+	"god-api-editor": true,
 }
 
 func main() {
 	db := flag.String("db", "untis.db", "sqlite database path")
 	username := flag.String("user", "", "username to grant/override access for (omit with -global)")
 	global := flag.Bool("global", false, "operate on the global switch that applies to all users")
-	elType := flag.String("type", "all", "element type: teacher|room|subject|all (case-insensitive)")
+	elType := flag.String("type", "all", "element type: teacher|room|subject|god-api|god-api-editor|all (case-insensitive)")
 	grant := flag.Bool("grant", false, "grant the type")
 	revoke := flag.Bool("revoke", false, "revoke the type")
 	clear := flag.Bool("clear", false, "clear all per-user overrides for -user (fall back to global)")
@@ -78,6 +89,9 @@ func main() {
 	if *grant == *revoke {
 		log.Fatal("exactly one of --grant or --revoke is required")
 	}
+	if *global && godFeatures[*elType] {
+		log.Fatal("god features (god-api, god-api-editor) are per-user only; use --user")
+	}
 
 	allowed := *grant
 	for _, t := range types {
@@ -102,7 +116,7 @@ func resolveTypes(s string) []string {
 	if t, ok := typeAliases[s]; ok {
 		return []string{t}
 	}
-	log.Fatalf("unknown type %q (use teacher|room|subject|all)", s)
+	log.Fatalf("unknown type %q (use teacher|room|subject|god-api|god-api-editor|all)", s)
 	return nil
 }
 

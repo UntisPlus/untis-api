@@ -226,6 +226,19 @@ func (p *Proxy) classNameFor(school, cookie string, classID int64) string {
 	return p.klasses[classID]
 }
 
+// hasPerm reports whether a user holds an explicit per-user permission feature
+// (ignoring global switches).
+func (p *Proxy) hasPerm(username, feature string) bool {
+	ok, _ := p.store.HasPerm(username, feature)
+	return ok
+}
+
+// isGod reports whether a user holds the god-api permission (a full raw
+// superuser whose account is used as the upstream source).
+func (p *Proxy) isGod(username string) bool {
+	return p.hasPerm(username, store.FeatureGodAPI)
+}
+
 func (p *Proxy) klassesExpired() bool {
 	return time.Since(p.klAt) > time.Hour
 }

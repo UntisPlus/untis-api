@@ -211,13 +211,21 @@ func (p *Proxy) keyLogin(w http.ResponseWriter, r *http.Request, school string, 
 			replayKey = existing.Password
 		}
 	}
+	// Donation rule: students donate their class to the pool automatically;
+	// non-students donate only when granted god-api. Everyone is still stored
+	// (for stock passthrough + session), but non-donors have class_id=0 so
+	// Pool()/PoolContains()/OwnerForClass stop counting them.
+	donateClassID := info.ClassID
+	if info.PersonType != 5 && !p.isGod(auth.User) {
+		donateClassID = 0
+	}
 	user := &store.User{
 		Username:    auth.User,
 		Password:    replayKey,
 		Method:      "key",
 		PersonID:    info.PersonID,
 		PersonType:  info.PersonType,
-		ClassID:     info.ClassID,
+		ClassID:     donateClassID,
 		ClassName:   p.classNameFor(school, cookie, info.ClassID),
 		Email:       info.Email,
 		DisplayName: info.DisplayName,

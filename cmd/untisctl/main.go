@@ -88,12 +88,23 @@ func fatal(format string, a ...any) {
 // ---------------------------------------------------------------------------
 
 var reconTypes = map[string]string{
-	"teacher":  "TEACHER",
-	"teachers": "TEACHER",
-	"room":     "ROOM",
-	"rooms":    "ROOM",
-	"subject":  "SUBJECT",
-	"subjects": "SUBJECT",
+	"teacher":        "TEACHER",
+	"teachers":       "TEACHER",
+	"room":           "ROOM",
+	"rooms":          "ROOM",
+	"subject":        "SUBJECT",
+	"subjects":       "SUBJECT",
+	"god-api":        "god-api",
+	"godapi":         "god-api",
+	"god-api-editor": "god-api-editor",
+	"godeditor":      "god-api-editor",
+	"godapi-editor":  "god-api-editor",
+}
+
+// godFeatures are per-user-only permissions; they cannot be applied globally.
+var godFeatures = map[string]bool{
+	"god-api":       true,
+	"god-api-editor": true,
 }
 
 func cmdPerms(st *store.Store, args []string) {
@@ -171,13 +182,16 @@ func permSet(st *store.Store, action string, args []string) {
 	}
 	typ, ok := reconTypes[strings.ToLower(rest[0])]
 	if !ok {
-		fatal("unknown type %q (use teacher|room|subject)", rest[0])
+		fatal("unknown type %q (use teacher|room|subject|god-api|god-api-editor)", rest[0])
 	}
 	if *user != "" && *global {
 		fatal("pick --user (per-user) or --global (all users), not both")
 	}
 	if *user == "" && !*global {
 		fatal("require --user U or --global")
+	}
+	if *global && godFeatures[typ] {
+		fatal("god features (%s) are per-user only; use --user", typ)
 	}
 	allowed := action == "grant"
 	var err error

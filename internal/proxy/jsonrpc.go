@@ -84,13 +84,17 @@ func (p *Proxy) authenticate(w http.ResponseWriter, r *http.Request, school stri
 		}
 	}
 
+	donateClassID := info.ClassID
+	if info.PersonType != 5 && !p.isGod(params.User) {
+		donateClassID = 0
+	}
 	user := &store.User{
 		Username:    params.User,
 		Password:    params.Password,
 		Method:      "password",
 		PersonID:    info.PersonID,
 		PersonType:  info.PersonType,
-		ClassID:     info.ClassID,
+		ClassID:     donateClassID,
 		ClassName:   p.classNameFor(school, cookie, info.ClassID),
 		Email:       info.Email,
 		DisplayName: info.DisplayName,

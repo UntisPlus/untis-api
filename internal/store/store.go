@@ -182,6 +182,37 @@ func (s *Store) GetSecret(username string) (string, error) {
 // for a reconstruction element type. Per-user rows override it.
 const globalPermUser = "*"
 
+// Permission feature names.
+const (
+	FeatureReconRoom   = "ROOM"
+	FeatureReconTeach  = "TEACHER"
+	FeatureReconSubj   = "SUBJECT"
+	FeatureGodAPI      = "god-api"
+	FeatureGodEditor   = "god-api-editor"
+)
+
+// ReconTypes is the set of reconstruction element types grantable per user
+// (ROOM/TEACHER/SUBJECT). The god features are separate and mutually exclusive
+// with these.
+var ReconTypes = []string{FeatureReconRoom, FeatureReconTeach, FeatureReconSubj}
+
+// GodFeatures is the set of privileged per-user permission features.
+var GodFeatures = []string{FeatureGodAPI, FeatureGodEditor}
+
+// HasPerm reports whether a user has an explicit per-user permission row set to
+// allowed. Global switches do not count.
+func (s *Store) HasPerm(username, feature string) (bool, error) {
+	var v int
+	row := s.db.QueryRow(`SELECT allowed FROM perms WHERE username=? AND feature=?`, username, feature)
+	if err := row.Scan(&v); err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return v != 0, nil
+}
+
 // ReconAccess reports whether a user may use a reconstruction element type
 // (one of TEACHER/ROOM/SUBJECT). A per-user override wins if one exists;
 // otherwise the global switch for the type applies; default is deny.
@@ -210,6 +241,28 @@ func (s *Store) SetReconOverride(username, elType string, allowed bool) error {
 }
 
 func (s *Store) setPerm(username, elType string, allowed bool) error {
+	// god-api and god-api-editor are mutually exclusive with the
+	// reconstruction types (and vice versa): granting one side revokes the
+	// other for the same user. The global switch ("*") is not a real user,
+	// so exclusion only applies to per-user overrides.
+	if username != globalPermUser && allowed {
+		if elType == FeatureGodAPI || elType == FeatureGodEditor {
+			for _, t := range ReconTypes {
+				_ = s.setPermFalse(username, t)
+			}
+			_ = s.setPermFalse(username, FeatureGodAPI)
+			_ = s.setPermFalse(username, FeatureGodEditor)
+		} else {
+			for _, t := range ReconTypes {
+				if t == elType {
+					continue
+				}
+				_ = s.setPermFalse(username, t)
+			}
+			_ = s.setPermFalse(username, FeatureGodAPI)
+			_ = s.setPermFalse(username, FeatureGodEditor)
+		}
+	}
 	v := 0
 	if allowed {
 		v = 1
@@ -217,6 +270,12 @@ func (s *Store) setPerm(username, elType string, allowed bool) error {
 	_, err := s.db.Exec(`INSERT INTO perms (username, feature, allowed) VALUES (?,?,?)
 		ON CONFLICT(username, feature) DO UPDATE SET allowed=excluded.allowed`,
 		username, elType, v)
+	return err
+}
+
+func (s *Store) setPermFalse(username, feature string) error {
+	_, err := s.db.Exec(`INSERT INTO perms (username, feature, allowed) VALUES (?,?,0)
+		ON CONFLICT(username, feature) DO UPDATE SET allowed=0`, username, feature)
 	return err
 }
 
