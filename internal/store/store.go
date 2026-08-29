@@ -27,6 +27,15 @@ type Class struct {
 	Name string
 }
 
+// ClassToken binds an opaque calendar subscription token to a school+class.
+type ClassToken struct {
+	Token      string
+	School     string
+	ClassID    int64
+	CreatedAt  int64
+	LastAccess int64
+}
+
 type Store struct {
 	db *sql.DB
 }
@@ -84,6 +93,16 @@ func Open(path string) (*Store, error) {
 		class_id INTEGER NOT NULL,
 		scan_until TEXT NOT NULL,
 		PRIMARY KEY (school, class_id)
+	)`)
+	if err != nil {
+		return nil, err
+	}
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS class_tokens (
+		token TEXT NOT NULL PRIMARY KEY,
+		school TEXT NOT NULL,
+		class_id INTEGER NOT NULL,
+		created_at INTEGER NOT NULL,
+		last_access INTEGER NOT NULL DEFAULT 0
 	)`)
 	if err != nil {
 		return nil, err
@@ -300,4 +319,39 @@ func (s *Store) scanUser(row *sql.Row) (*User, error) {
 	u.CreatedAt = time.Unix(ca, 0)
 	u.LastSeen = time.Unix(ls, 0)
 	return &u, nil
+}
+
+func (s *Store) CreateClassToken(t *ClassToken) error {
+	_, err := s.db.Exec(`INSERT INTO class_tokens (token, school, class_id, created_at, last_access)
+		VALUES (?,?,?,?,?)`, t.Token, t.School, t.ClassID, t.CreatedAt, t.LastAccess)
+	return err
+}
+
+// ClassTokenForClass returns the existing token for a school+class, if any.
+func (s *Store) ClassTokenForClass(school string, classID int64) (*ClassToken, error) {
+	return s.scanClassToken(s.db.QueryRow(`SELECT token, school, class_id, created_at, last_access
+		FROM class_tokens WHERE school=? AND class_id=?`, school, classID))
+}
+
+func (s *Store) ClassTokenByToken(token string) (*ClassToken, error) {
+	return s.scanClassToken(s.db.QueryRow(`SELECT token, school, class_id, created_at, last_access
+		FROM class_tokens WHERE token=?`, token))
+}
+
+// TouchClassToken updates the last-access timestamp of an existing token.
+func (s *Store) TouchClassToken(token string, at int64) error {
+	_, err := s.db.Exec(`UPDATE class_tokens SET last_access=? WHERE token=?`, at, token)
+	return err
+}
+
+func (s *Store) scanClassToken(row *sql.Row) (*ClassToken, error) {
+	var t ClassToken
+	err := row.Scan(&t.Token, &t.School, &t.ClassID, &t.CreatedAt, &t.LastAccess)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
 }

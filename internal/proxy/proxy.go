@@ -152,6 +152,8 @@ func (p *Proxy) Handler() http.Handler {
 	mux.HandleFunc("/WebUntis/jsonrpc_intern.do", p.handleJSONRPCIntern)
 	mux.HandleFunc("/WebUntis/api/", p.handleREST)
 	mux.HandleFunc("/status", p.handleStatus)
+	mux.HandleFunc("POST /api/calendar/token", p.handleCalendarToken)
+	mux.HandleFunc("GET /api/calendar/{token}", p.handleCalendarICS)
 	return mux
 }
 
@@ -199,7 +201,7 @@ func (p *Proxy) sessionUser(r *http.Request) *store.User {
 
 func (p *Proxy) setSessionCookies(w http.ResponseWriter, sid, school string) {
 	http.SetCookie(w, &http.Cookie{
-		Name: "JSESSIONID", Value: sid, Path: "/WebUntis",
+		Name: "JSESSIONID", Value: sid, Path: "/",
 		HttpOnly: true, SameSite: http.SameSiteNoneMode,
 	})
 	sc := "_" + base64.StdEncoding.EncodeToString([]byte(school))
