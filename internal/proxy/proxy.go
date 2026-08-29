@@ -14,7 +14,6 @@ import (
 
 type Options struct {
 	School string
-	Server string
 	TTL    time.Duration
 }
 

@@ -204,9 +204,10 @@ func (p *Proxy) keyLogin(w http.ResponseWriter, r *http.Request, school string, 
 		return
 	}
 
+	isAnon := auth.User == "#anonymous#"
 	info, _ := p.untis.PersonInfo(school, cookie)
 	if replayKey == "" {
-		if existing, err := p.store.GetUser(auth.User); err == nil && existing.Password != "" {
+		if existing, err := p.store.GetUser(auth.User); err == nil && existing != nil && existing.Password != "" {
 			replayKey = existing.Password
 		}
 	}
@@ -221,8 +222,12 @@ func (p *Proxy) keyLogin(w http.ResponseWriter, r *http.Request, school string, 
 		Email:       info.Email,
 		DisplayName: info.DisplayName,
 	}
-	_ = p.store.UpsertUser(user)
-	_ = p.store.Touch(auth.User)
+	// The official anonymous login is only a session: don't persist
+	// "#anonymous#" as a pool account or owner.
+	if !isAnon {
+		_ = p.store.UpsertUser(user)
+		_ = p.store.Touch(auth.User)
+	}
 	go p.untis.Logout(school, cookie)
 
 	s := p.sessions.New(auth.User, info.ClassID)

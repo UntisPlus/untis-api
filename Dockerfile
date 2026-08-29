@@ -22,9 +22,7 @@ VOLUME /data
 ENV UNTIS_ADDR=:8509 \
     UNTIS_SERVER=schuldorf.webuntis.com \
     UNTIS_SCHOOL=schuldorf \
-    UNTIS_DB=/data/untis.db \
-    UNTIS_YEAR_START=2026-08-10 \
-    UNTIS_YEAR_END=2027-06-27
+    UNTIS_DB=/data/untis.db
 
 EXPOSE 8509
-CMD ["sh", "-c", "untis-server -addr \"$UNTIS_ADDR\" -server \"$UNTIS_SERVER\" -school \"$UNTIS_SCHOOL\" -db \"$UNTIS_DB\" -year-start \"$UNTIS_YEAR_START\" -year-end \"$UNTIS_YEAR_END\""]
+CMD ["sh", "-c", "untis-server -addr \"$UNTIS_ADDR\" -server \"$UNTIS_SERVER\" -school \"$UNTIS_SCHOOL\" -db \"$UNTIS_DB\""]

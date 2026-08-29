@@ -28,6 +28,44 @@ func newElementDB() *elementDB {
 	}
 }
 
+// snapshot returns the current element sets as type -> [ids], suitable for
+// persisting on shutdown.
+func (e *elementDB) snapshot() map[string][]int64 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := map[string][]int64{}
+	for id := range e.teachers {
+		out["TEACHER"] = append(out["TEACHER"], id)
+	}
+	for id := range e.rooms {
+		out["ROOM"] = append(out["ROOM"], id)
+	}
+	for id := range e.subjects {
+		out["SUBJECT"] = append(out["SUBJECT"], id)
+	}
+	return out
+}
+
+// seedFrom merges in a previously-persisted set of known elements. It is a warm
+// start only: the background scan re-runs on boot and revalidates (and removes
+// nothing) once it fetches fresh timetables.
+func (e *elementDB) seedFrom(elems map[string][]int64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for t, ids := range elems {
+		for _, id := range ids {
+			switch t {
+			case "TEACHER":
+				e.teachers[id] = true
+			case "ROOM":
+				e.rooms[id] = true
+			case "SUBJECT":
+				e.subjects[id] = true
+			}
+		}
+	}
+}
+
 func (e *elementDB) has(elType string, id int64) bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -115,7 +153,12 @@ func chunkDates(start, end string) ([][2]string, error) {
 }
 
 // classPeriods returns all periods for a class over a (possibly long) range,
-// fetched in <=2 week chunks and deduplicated by lesson id.
+// fetched in <=2 week chunks and deduplicated by period id.
+//
+// Periods are deduplicated by their unique period id, NOT by lesson id: a
+// double (or longer) lesson is represented by the school server as several
+// distinct period entries that share one lessonId. Deduping on lessonId would
+// collapse those consecutive time slots into a single one.
 func (p *Proxy) classPeriods(school string, classID int64, start, end string) ([]map[string]any, error) {
 	chunks, err := chunkDates(start, end)
 	if err != nil {
@@ -129,11 +172,11 @@ func (p *Proxy) classPeriods(school string, classID int64, start, end string) ([
 			return nil, err
 		}
 		for _, pd := range ps {
-			lid, _ := pd["lessonId"].(float64)
-			if seen[int64(lid)] {
+			pid, _ := pd["id"].(float64)
+			if seen[int64(pid)] {
 				continue
 			}
-			seen[int64(lid)] = true
+			seen[int64(pid)] = true
 			out = append(out, pd)
 		}
 	}
@@ -254,6 +297,7 @@ func (p *Proxy) scanClass(school string, classID int64, yearStart, yearEnd strin
 	p.recon.mu.Lock()
 	p.recon.scanUntil[classID] = horizon
 	p.recon.mu.Unlock()
+	_ = p.store.SaveReconScanAt(school, classID, horizon)
 }
 
 // StartRecon kicks off background enumeration of known teachers/rooms/subjects
@@ -275,6 +319,30 @@ func (p *Proxy) StartRecon(school, yearStart, yearEnd string) {	classes, err := 
 		log.Printf("[recon] enumeration done: %d teachers, %d rooms, %d subjects",
 			len(p.recon.teachers), len(p.recon.rooms), len(p.recon.subjects))
 	}()
+}
+
+// LoadRecon restores the persisted element set so reconstruction requests are
+// answered immediately on boot, before the background scan finishes. The scan
+// then re-runs and refreshes the fresh state. It is only ever a warm start and
+// not served as a replacement for fresh data.
+func (p *Proxy) LoadRecon() {
+	elems, err := p.store.LoadReconElements()
+	if err != nil || len(elems) == 0 {
+		return
+	}
+	p.recon.seedFrom(elems)
+	log.Printf("[recon] restored snapshot: %d teachers, %d rooms, %d subjects",
+		len(elems["TEACHER"]), len(elems["ROOM"]), len(elems["SUBJECT"]))
+}
+
+// PersistRecon writes the current recon element set (and per-class scan
+// progress) to persistent storage. Call on graceful shutdown.
+func (p *Proxy) PersistRecon() {
+	if err := p.store.SaveReconElements(p.recon.snapshot()); err != nil {
+		log.Printf("[recon] persist snapshot: %v", err)
+		return
+	}
+	log.Printf("[recon] saved snapshot")
 }
 
 // weekRange returns the Monday..Friday range containing the given date.

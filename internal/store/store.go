@@ -71,6 +71,23 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS recon_elements (
+		el_type TEXT NOT NULL,
+		el_id INTEGER NOT NULL,
+		PRIMARY KEY (el_type, el_id)
+	)`)
+	if err != nil {
+		return nil, err
+	}
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS recon_scan (
+		school TEXT NOT NULL,
+		class_id INTEGER NOT NULL,
+		scan_until TEXT NOT NULL,
+		PRIMARY KEY (school, class_id)
+	)`)
+	if err != nil {
+		return nil, err
+	}
 	return &Store{db: db}, nil
 }
 
@@ -122,6 +139,65 @@ func (s *Store) RevokeAll() (int64, error) {
 	}
 	n, _ := res.RowsAffected()
 	return n, nil
+}
+
+// SaveReconElements replaces the persisted teacher/room/subject set with the
+// given types->id map. It is written on shutdown so a later boot can answer
+// reconstruction requests before the background scan revalidates.
+func (s *Store) SaveReconElements(elems map[string][]int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM recon_elements`); err != nil {
+		tx.Rollback()
+		return err
+	}
+	ins, err := tx.Prepare(`INSERT INTO recon_elements (el_type, el_id) VALUES (?,?)`)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	for t, ids := range elems {
+		for _, id := range ids {
+			if _, err := ins.Exec(t, id); err != nil {
+				ins.Close()
+				tx.Rollback()
+				return err
+			}
+		}
+	}
+	ins.Close()
+	return tx.Commit()
+}
+
+// LoadReconElements returns the persisted teacher/room/subject set as
+// type -> [ids].
+func (s *Store) LoadReconElements() (map[string][]int64, error) {
+	rows, err := s.db.Query(`SELECT el_type, el_id FROM recon_elements`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]int64{}
+	for rows.Next() {
+		var t string
+		var id int64
+		if err := rows.Scan(&t, &id); err != nil {
+			return nil, err
+		}
+		out[t] = append(out[t], id)
+	}
+	return out, rows.Err()
+}
+
+// SaveReconScanAt records how far a class's recon scan reached. On boot this is
+// cleared so the scan re-runs from the year start for freshness.
+func (s *Store) SaveReconScanAt(school string, classID int64, until string) error {
+	_, err := s.db.Exec(`INSERT INTO recon_scan (school, class_id, scan_until) VALUES (?,?,?)
+		ON CONFLICT(school, class_id) DO UPDATE SET scan_until=excluded.scan_until`,
+		school, classID, until)
+	return err
 }
 
 func (s *Store) Close() error { return s.db.Close() }

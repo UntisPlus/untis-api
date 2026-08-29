@@ -10,8 +10,6 @@ services:
       UNTIS_ADDR: ":8509"
       UNTIS_SERVER: "schuldorf.webuntis.com"
       UNTIS_SCHOOL: "schuldorf"
-      UNTIS_YEAR_START: "2026-08-10"
-      UNTIS_YEAR_END: "2027-06-27"
     volumes:
       - ./data:/data
     labels:

@@ -53,13 +53,20 @@ type Client struct {
 	hc       *http.Client
 	mu       sync.Mutex
 	sessions map[string]cachedSession // username -> real session cookie
+
+	serverMu sync.Mutex
+	servers  map[string]string // school -> resolved upstream host
 }
 
 func New(cfg Config) *Client {
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 25 * time.Second}
 	}
-	return &Client{cfg: cfg, hc: cfg.HTTPClient, sessions: make(map[string]cachedSession)}
+	servers := map[string]string{}
+	if cfg.School != "" && cfg.Server != "" {
+		servers[cfg.School] = cfg.Server
+	}
+	return &Client{cfg: cfg, hc: cfg.HTTPClient, sessions: make(map[string]cachedSession), servers: servers}
 }
 
 // TOTP computes a RFC6238 time-based one-time password from a base32 secret.
@@ -86,7 +93,77 @@ func (c *Client) base(school string) string {
 	if school == "" {
 		school = c.cfg.School
 	}
-	return "https://" + c.cfg.Server
+	return "https://" + c.serverFor(school)
+}
+
+// serverFor returns the canonical upstream host for a school. The WebUntis
+// mobile apps identify a school by name and contact <school>.webuntis.com, so
+// the server host is resolved from the school name via the official school
+// query API on first use and cached thereafter. When resolution is unavailable
+// (network error, unknown school, or a default has been configured directly)
+// it falls back to the configured default server.
+func (c *Client) serverFor(school string) string {
+	if school == "" {
+		school = c.cfg.School
+	}
+	c.serverMu.Lock()
+	defer c.serverMu.Unlock()
+	if h, ok := c.servers[school]; ok {
+		return h
+	}
+	h := c.cfg.Server
+	if resolved := c.resolveServerHost(school); resolved != "" {
+		h = resolved
+	}
+	c.servers[school] = h
+	return h
+}
+
+// resolveServerHost looks up the canonical server hostname for a school using
+// the official WebUntis school search endpoint. Returns "" when the school is
+// not found or the lookup fails.
+func (c *Client) resolveServerHost(school string) string {
+	body, _ := json.Marshal(map[string]any{
+		"id": "untis-mobile-android", "jsonrpc": "2.0", "method": "searchSchool",
+		"params": []any{map[string]any{"schoolid": 0, "search": school}},
+	})
+	req, err := http.NewRequest("POST", "https://schoolsearch.webuntis.com/schoolquery2?v=i2.2", bytes.NewReader(body))
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) untis-proxy/1.0")
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ""
+	}
+	var res struct {
+		Result struct {
+			Schools []struct {
+				LoginName string `json:"loginName"`
+				Server    string `json:"server"`
+			} `json:"schools"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(b, &res) != nil {
+		return ""
+	}
+	for _, s := range res.Result.Schools {
+		if strings.EqualFold(s.LoginName, school) && s.Server != "" {
+			return s.Server
+		}
+	}
+	// fall back to the sole match if there is exactly one (avoids guessing on
+	// ambiguous search strings that could return several schools)
+	if len(res.Result.Schools) == 1 && res.Result.Schools[0].Server != "" {
+		return res.Result.Schools[0].Server
+	}
+	return ""
 }
 
 func (c *Client) schoolCookie(school string) string {
