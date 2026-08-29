@@ -10,6 +10,8 @@ services:
       UNTIS_ADDR: ":8509"
       UNTIS_SERVER: "schuldorf.webuntis.com"
       UNTIS_SCHOOL: "schuldorf"
+      UNTIS_ENV: "prod"
+      UNTIS_VERSION: "v1.1.0"
     volumes:
       - ./data:/data
     labels:

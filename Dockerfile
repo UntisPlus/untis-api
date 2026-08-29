@@ -22,7 +22,9 @@ VOLUME /data
 ENV UNTIS_ADDR=:8509 \
     UNTIS_SERVER=schuldorf.webuntis.com \
     UNTIS_SCHOOL=schuldorf \
-    UNTIS_DB=/data/untis.db
+    UNTIS_DB=/data/untis.db \
+    UNTIS_ENV=prod \
+    UNTIS_VERSION=dev
 
 EXPOSE 8509
-CMD ["sh", "-c", "untis-server -addr \"$UNTIS_ADDR\" -server \"$UNTIS_SERVER\" -school \"$UNTIS_SCHOOL\" -db \"$UNTIS_DB\""]
+CMD ["sh", "-c", "untis-server -addr \"$UNTIS_ADDR\" -server \"$UNTIS_SERVER\" -school \"$UNTIS_SCHOOL\" -db \"$UNTIS_DB\" -env \"$UNTIS_ENV\" -version \"$UNTIS_VERSION\""]

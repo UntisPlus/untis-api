@@ -151,6 +151,7 @@ func (p *Proxy) Handler() http.Handler {
 	mux.HandleFunc("/WebUntis/jsonrpc.do", p.handleJSONRPC)
 	mux.HandleFunc("/WebUntis/jsonrpc_intern.do", p.handleJSONRPCIntern)
 	mux.HandleFunc("/WebUntis/api/", p.handleREST)
+	mux.HandleFunc("/status", p.handleStatus)
 	return mux
 }
 

@@ -6,6 +6,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -24,7 +25,16 @@ func main() {
 	ttl := flag.Duration("ttl", 5*time.Minute, "timetable cache TTL")
 	yearStart := flag.String("year-start", "", "school year start override (default: auto-derived)")
 	yearEnd := flag.String("year-end", "", "school year end override (default: auto-derived)")
+	env := flag.String("env", "", "deployment mode (dev|beta|prod); defaults to UNTIS_ENV, else dev")
+	version := flag.String("version", "dev", "reported build version")
 	flag.Parse()
+
+	if *env != "" {
+		os.Setenv("UNTIS_ENV", *env)
+	}
+	if *version != "" {
+		os.Setenv("UNTIS_VERSION", *version)
+	}
 
 	ys, ye := schoolYear(time.Now())
 	if *yearStart != "" {

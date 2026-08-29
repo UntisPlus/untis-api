@@ -245,7 +245,8 @@ func (s *Store) UserByPersonID(personID int64) (*User, error) {
 }
 
 func (s *Store) Pool() ([]Class, error) {
-	rows, err := s.db.Query(`SELECT DISTINCT class_id, class_name FROM users WHERE class_id > 0`)
+	rows, err := s.db.Query(`SELECT class_id, COALESCE(MAX(class_name),'') AS name
+		FROM users WHERE class_id > 0 GROUP BY class_id ORDER BY class_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -259,6 +260,12 @@ func (s *Store) Pool() ([]Class, error) {
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) UserCount() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n)
+	return n, err
 }
 
 func (s *Store) PoolContains(classID int64) (bool, error) {

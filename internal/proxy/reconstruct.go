@@ -46,6 +46,17 @@ func (e *elementDB) snapshot() map[string][]int64 {
 	return out
 }
 
+// counts returns the number of known elements per type.
+func (e *elementDB) counts() map[string]int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return map[string]int{
+		"TEACHER": len(e.teachers),
+		"ROOM":    len(e.rooms),
+		"SUBJECT": len(e.subjects),
+	}
+}
+
 // seedFrom merges in a previously-persisted set of known elements. It is a warm
 // start only: the background scan re-runs on boot and revalidates (and removes
 // nothing) once it fetches fresh timetables.
