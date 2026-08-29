@@ -67,7 +67,7 @@ GET  /api/calendar/{token}.ics   # the iCal feed (Outlook/Google subscribe)
 
 `POST /api/calendar/token` requires a logged-in session.
 
-- `{"class": true}` → a token bound to the **class** timetable (everyone in the pool).
+- `{"classId": <id>}` → a token bound to the **class** timetable (everyone in the pool).
 - `{"personal": true}` → a personal **STUDENT** token for the session user
   (their real per-student schedule, fewer lessons than the whole class).
 
