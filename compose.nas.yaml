@@ -7,10 +7,12 @@ services:
       - "8509:8509"
     environment:
       UNTIS_ADDR: ":8509"
-      UNTIS_SERVER: "schuldorf.webuntis.com"
-      UNTIS_SCHOOL: "schuldorf"
       UNTIS_ENV: "prod"
       UNTIS_VERSION: "v1.2.0"
       UNTIS_POLL_INTERVAL: "60s"
     volumes:
       - ./data:/data
+    labels:
+      - dockflare.enable=true
+      - dockflare.hostname=api-untis.deelabs.tech
+      - dockflare.service=http://untis-proxy:8509
