@@ -25,6 +25,10 @@ func (p *Proxy) handleREST(w http.ResponseWriter, r *http.Request) {
 				// BetterUntis self-authenticates REST calls via a Bearer token
 				// (from getAuthToken); forward as-is so the real server serves
 				// only that user's own data.
+				if isSensitiveRESTPath(r.URL.Path) && (r.Method == "POST" || r.Method == "PUT" || r.Method == "DELETE") {
+					p.forbidden(w)
+					return
+				}
 				b, status, err := p.untis.RESTGetToken(school, tok, r.URL.Path, r.URL.RawQuery)
 				if err != nil {
 					p.forbidden(w)
@@ -37,6 +41,19 @@ func (p *Proxy) handleREST(w http.ResponseWriter, r *http.Request) {
 			}
 			p.forbidden(w)
 			return
+		}
+		// Session path: check sensitive endpoints with editor permission
+		if isSensitiveRESTPath(r.URL.Path) {
+			if r.Method == "POST" || r.Method == "PUT" || r.Method == "DELETE" {
+				if !p.isEditor(user.Username) {
+					p.forbidden(w)
+					return
+				}
+			} else if strings.Contains(r.URL.Path, "/absences/") && !p.isEditor(user.Username) {
+				// GET absences also blocked without editor
+				p.forbidden(w)
+				return
+			}
 		}
 		cookie, err := p.untis.Session(school, user.Username, user.Password, user.Method)
 		if err != nil {

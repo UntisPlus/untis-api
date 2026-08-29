@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -237,6 +238,42 @@ func (p *Proxy) hasPerm(username, feature string) bool {
 // superuser whose account is used as the upstream source).
 func (p *Proxy) isGod(username string) bool {
 	return p.hasPerm(username, store.FeatureGodAPI)
+}
+
+// isEditor reports whether a user holds the god-api-editor permission
+// (allows absence-checking + lesson/subject write methods).
+func (p *Proxy) isEditor(username string) bool {
+	return p.hasPerm(username, store.FeatureGodEditor)
+}
+
+// isSensitiveMethod reports whether a JSON-RPC method is an absence-checking
+// or write/mutation method that should be blocked unless the user has
+// god-api-editor.
+func isSensitiveMethod(method string) bool {
+	// Absence-checking methods
+	switch method {
+	case "getStudentAbsences2017", "getPersonAbsence", "getOwnAbsence", "getTimetableWithAbsences":
+		return true
+	}
+	// Write/mutation methods - block by prefix
+	for _, prefix := range []string{"set", "add", "update", "delete", "change"} {
+		if strings.HasPrefix(strings.ToLower(method), prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// isSensitiveRESTPath reports whether a REST path is an absence or write
+// endpoint that should be blocked unless the user has god-api-editor.
+func isSensitiveRESTPath(path string) bool {
+	// Absence REST paths
+	if strings.Contains(path, "/absences/") {
+		return true
+	}
+	// Write/mutation REST paths - block POST/PUT/DELETE to timetable/classreg
+	// (checked via method in caller)
+	return false
 }
 
 func (p *Proxy) klassesExpired() bool {

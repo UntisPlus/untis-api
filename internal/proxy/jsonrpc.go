@@ -132,6 +132,11 @@ func (p *Proxy) passthrough(w http.ResponseWriter, r *http.Request, school strin
 		p.writeJSONRPCError(w, idOf(body), "not logged in", -8520)
 		return
 	}
+	method := extractMethod(body)
+	if isSensitiveMethod(method) && !p.isEditor(user.Username) {
+		p.writeJSONRPCError(w, idOf(body), "method not allowed", -32601)
+		return
+	}
 	cookie, err := p.untis.Session(school, user.Username, user.Password, user.Method)
 	if err != nil {
 		p.writeJSONRPCError(w, idOf(body), "not logged in", -8520)
@@ -144,6 +149,15 @@ func (p *Proxy) passthrough(w http.ResponseWriter, r *http.Request, school strin
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(b)
+}
+
+// extractMethod extracts the JSON-RPC method name from the request body.
+func extractMethod(body []byte) string {
+	var req struct {
+		Method string `json:"method"`
+	}
+	_ = json.Unmarshal(body, &req)
+	return req.Method
 }
 
 func idOf(body []byte) json.RawMessage {

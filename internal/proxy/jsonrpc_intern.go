@@ -81,6 +81,12 @@ func (p *Proxy) handleJSONRPCIntern(w http.ResponseWriter, r *http.Request) {
 			if m == "" {
 				m = req.Method
 			}
+			// Check sensitive method denylist for self-auth path
+			username := extractAuthUser(body)
+			if username != "" && isSensitiveMethod(m) && !p.isEditor(username) {
+				p.writeJSONRPCError(w, req.ID, "method not allowed", -32601)
+				return
+			}
 			b, status, _, err := p.untis.RawIntern(school, "", m, body)
 			if err != nil {
 				p.writeJSONRPCError(w, req.ID, "upstream error", -1)
@@ -96,14 +102,19 @@ func (p *Proxy) handleJSONRPCIntern(w http.ResponseWriter, r *http.Request) {
 			p.writeJSONRPCError(w, req.ID, "not logged in", -8520)
 			return
 		}
+		m := r.URL.Query().Get("m")
+		if m == "" {
+			m = req.Method
+		}
+		// Check sensitive method denylist for session path
+		if isSensitiveMethod(m) && !p.isEditor(user.Username) {
+			p.writeJSONRPCError(w, req.ID, "method not allowed", -32601)
+			return
+		}
 		cookie, err := p.untis.Session(school, user.Username, user.Password, user.Method)
 		if err != nil {
 			p.writeJSONRPCError(w, req.ID, "not logged in", -8520)
 			return
-		}
-		m := r.URL.Query().Get("m")
-		if m == "" {
-			m = req.Method
 		}
 		b, status, _, err := p.untis.RawIntern(school, cookie, m, body)
 		if err != nil {
@@ -136,6 +147,28 @@ func hasAuthBlock(body []byte) bool {
 		}
 	}
 	return false
+}
+
+// extractAuthUser extracts the username from the self-auth block in the
+// request body (if present).
+func extractAuthUser(body []byte) string {
+	var req struct {
+		Params []struct {
+			Auth struct {
+				User string `json:"user"`
+				OTP  any    `json:"otp"`
+			} `json:"auth"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return ""
+	}
+	for _, pr := range req.Params {
+		if pr.Auth.User != "" {
+			return pr.Auth.User
+		}
+	}
+	return ""
 }
 
 func isBase32Secret(s string) bool {
