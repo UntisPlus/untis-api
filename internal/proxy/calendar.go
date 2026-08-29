@@ -40,8 +40,10 @@ func (p *Proxy) handleCalendarToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		School  string `json:"school"`
-		ClassID int64  `json:"classId"`
+		School   string `json:"school"`
+		ClassID  int64  `json:"classId"`
+		PersonID int64  `json:"personId"`
+		Personal bool   `json:"personal"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -51,6 +53,45 @@ func (p *Proxy) handleCalendarToken(w http.ResponseWriter, r *http.Request) {
 	if school == "" {
 		school = p.opts.School
 	}
+
+	// A "personal" token binds to the session user's own student timetable,
+	// served from the STUDENT endpoint (reflects individual subject enrollment).
+	if req.Personal || req.PersonID > 0 {
+		pid := req.PersonID
+		if pid == 0 {
+			pid = u.PersonID
+		}
+		if pid <= 0 || u.PersonID != pid {
+			p.forbidden(w)
+			return
+		}
+		tok, err := p.store.ClassTokenForPerson(school, pid)
+		if err != nil {
+			p.writeJSON(w, map[string]any{"error": "store error"})
+			return
+		}
+		if tok == nil {
+			now := time.Now().Unix()
+			tok = &store.ClassToken{
+				Token: newCalendarToken(), School: school,
+				PersonID: pid, CreatedAt: now, LastAccess: now,
+			}
+			if err := p.store.CreateClassToken(tok); err != nil {
+				p.writeJSON(w, map[string]any{"error": "store error"})
+				return
+			}
+		}
+		p.writeJSON(w, map[string]any{
+			"school":   tok.School,
+			"personId": tok.PersonID,
+			"token":    tok.Token,
+			"url":      p.calendarURL(r, tok.Token),
+			"created":  tok.CreatedAt,
+			"lastUsed": tok.LastAccess,
+		})
+		return
+	}
+
 	if req.ClassID <= 0 {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"error":"classId required"}`))
@@ -100,15 +141,32 @@ func (p *Proxy) handleCalendarICS(w http.ResponseWriter, r *http.Request) {
 	_ = p.store.TouchClassToken(token, time.Now().Unix())
 
 	md := p.masterData(tok.School)
-	className := elementName(md, "CLASS", tok.ClassID)
-	if className == "" {
-		className = fmt.Sprintf("class-%d", tok.ClassID)
-	}
-
 	start := time.Now()
 	end := start.AddDate(0, 0, 30)
-	periods, err := p.classPeriods(tok.School, tok.ClassID,
-		start.Format("2006-01-02"), end.Format("2006-01-02"))
+
+	calName := ""
+	filename := ""
+	var periods []map[string]any
+	if tok.PersonID > 0 {
+		// personal timetable served from the STUDENT endpoint
+		u, perr := p.store.UserByPersonID(tok.PersonID)
+		calName = "Mein Stundenplan"
+		if perr == nil && u != nil && u.DisplayName != "" {
+			calName = u.DisplayName
+		}
+		periods, err = p.studentPeriods(tok.School, tok.PersonID,
+			start.Format("2006-01-02"), end.Format("2006-01-02"))
+		filename = fmt.Sprintf("untis-%d.ics", tok.PersonID)
+	} else {
+		className := elementName(md, "CLASS", tok.ClassID)
+		if className == "" {
+			className = fmt.Sprintf("class-%d", tok.ClassID)
+		}
+		calName = className
+		periods, err = p.classPeriods(tok.School, tok.ClassID,
+			start.Format("2006-01-02"), end.Format("2006-01-02"))
+		filename = fmt.Sprintf("untis-%d.ics", tok.ClassID)
+	}
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = w.Write([]byte(`{"error":"fetch failed"}`))
@@ -120,15 +178,15 @@ func (p *Proxy) handleCalendarICS(w http.ResponseWriter, r *http.Request) {
 	b.WriteString("VERSION:2.0\r\n")
 	b.WriteString("PRODID:-//untis-api//Calendar//EN\r\n")
 	b.WriteString("CALSCALE:GREGORIAN\r\n")
-	b.WriteString("X-WR-CALNAME:" + icsEscape("Untis "+className) + "\r\n")
-	b.WriteString("X-WR-CALDESC:" + icsEscape("Untis timetable for "+className) + "\r\n")
+	b.WriteString("X-WR-CALNAME:" + icsEscape("Untis "+calName) + "\r\n")
+	b.WriteString("X-WR-CALDESC:" + icsEscape("Untis timetable for "+calName) + "\r\n")
 	for _, pd := range periods {
 		b.WriteString(p.buildICSVEVENT(pd, md))
 	}
 	b.WriteString("END:VCALENDAR\r\n")
 
 	w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="untis-%d.ics"`, tok.ClassID))
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	_, _ = w.Write([]byte(b.String()))
 }
 

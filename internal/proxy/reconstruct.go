@@ -6,6 +6,8 @@ import (
 	"log"
 	"sync"
 	"time"
+
+	"untis-proxy/internal/store"
 )
 
 // elementDB tracks which teachers/rooms/subjects actually appear in the pooled
@@ -230,6 +232,83 @@ func (p *Proxy) classPeriodsFresh(school string, classID int64, start, end strin
 		}
 	}
 	return out, nil
+}
+
+// studentPeriods returns a student's personal timetable over a range by querying
+// WebUntis with element type STUDENT for the given person id, using the
+// student's own account. This reflects the student's individual subject
+// enrollment (e.g. Wahlpflicht group splits), so it can differ from the full
+// class timetable. Results are cached in the shared TTL cache.
+func (p *Proxy) studentPeriods(school string, personID int64, start, end string) ([]map[string]any, error) {
+	u, err := p.store.UserByPersonID(personID)
+	if err != nil || u == nil {
+		return nil, fmt.Errorf("no user for person %d", personID)
+	}
+	chunks, err := chunkDates(start, end)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[int64]bool{}
+	var out []map[string]any
+	for _, c := range chunks {
+		ps, err := p.fetchStudentChunk(school, u, personID, c[0], c[1])
+		if err != nil {
+			return nil, err
+		}
+		for _, pd := range ps {
+			pid, _ := pd["id"].(float64)
+			if seen[int64(pid)] {
+				continue
+			}
+			seen[int64(pid)] = true
+			out = append(out, pd)
+		}
+	}
+	return out, nil
+}
+
+// fetchStudentChunk fetches one chunk of a student's personal timetable.
+func (p *Proxy) fetchStudentChunk(school string, u *store.User, personID int64, start, end string) ([]map[string]any, error) {
+	key := fmt.Sprintf("student|%d|%s|%s", personID, start, end)
+	if v, ok := p.tt.Get(key); ok {
+		var out []map[string]any
+		if err := json.Unmarshal(v, &out); err == nil {
+			return out, nil
+		}
+	}
+	body, _ := json.Marshal(map[string]any{
+		"id": "untis-proxy-student", "jsonrpc": "2.0", "method": "getTimetable2017",
+		"params": []any{map[string]any{
+			"id": personID, "type": "STUDENT",
+			"startDate": start, "endDate": end,
+			"masterDataTimestamp": 0, "timetableTimestamp": 0, "timetableTimestamps": []any{},
+		}},
+	})
+	cookie, err := p.untis.Session(school, u.Username, u.Password, u.Method)
+	if err != nil {
+		return nil, err
+	}
+	newBody, err := p.rewriteAuthForOwner(school, body, u)
+	if err != nil {
+		return nil, err
+	}
+	b, _, _, err := p.untis.RawIntern(school, cookie, "getTimetable2017", newBody)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Result struct {
+			Timetable struct {
+				Periods []map[string]any `json:"periods"`
+			} `json:"timetable"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(b, &resp); err != nil {
+		return nil, err
+	}
+	raw, _ := json.Marshal(resp.Result.Timetable.Periods)
+	p.tt.Put(key, raw)
+	return resp.Result.Timetable.Periods, nil
 }
 
 func periodElementIDs(pd map[string]any) []struct {

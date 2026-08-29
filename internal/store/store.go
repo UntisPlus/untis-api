@@ -27,11 +27,13 @@ type Class struct {
 	Name string
 }
 
-// ClassToken binds an opaque calendar subscription token to a school+class.
+// ClassToken binds an opaque calendar subscription token to a school and
+// either a class (ClassID > 0) or a personal student timetable (PersonID > 0).
 type ClassToken struct {
 	Token      string
 	School     string
 	ClassID    int64
+	PersonID   int64
 	CreatedAt  int64
 	LastAccess int64
 }
@@ -100,7 +102,8 @@ func Open(path string) (*Store, error) {
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS class_tokens (
 		token TEXT NOT NULL PRIMARY KEY,
 		school TEXT NOT NULL,
-		class_id INTEGER NOT NULL,
+		class_id INTEGER NOT NULL DEFAULT 0,
+		person_id INTEGER NOT NULL DEFAULT 0,
 		created_at INTEGER NOT NULL,
 		last_access INTEGER NOT NULL DEFAULT 0
 	)`)
@@ -132,7 +135,31 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// migration: add person_id to class_tokens for older databases
+	if err := addColumnIfMissing(db, "class_tokens", "person_id", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return nil, err
+	}
 	return &Store{db: db}, nil
+}
+
+// addColumnIfMissing adds a column to a table if it does not already exist.
+func addColumnIfMissing(db *sql.DB, table, column, ddl string) error {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	_, err = db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + ddl)
+	return err //nolint
 }
 
 func (s *Store) UpsertSecret(username, secret string) error {
@@ -347,25 +374,31 @@ func (s *Store) scanUser(row *sql.Row) (*User, error) {
 }
 
 func (s *Store) CreateClassToken(t *ClassToken) error {
-	_, err := s.db.Exec(`INSERT INTO class_tokens (token, school, class_id, created_at, last_access)
-		VALUES (?,?,?,?,?)`, t.Token, t.School, t.ClassID, t.CreatedAt, t.LastAccess)
+	_, err := s.db.Exec(`INSERT INTO class_tokens (token, school, class_id, person_id, created_at, last_access)
+		VALUES (?,?,?,?,?,?)`, t.Token, t.School, t.ClassID, t.PersonID, t.CreatedAt, t.LastAccess)
 	return err
 }
 
 // ClassTokenForClass returns the existing token for a school+class, if any.
 func (s *Store) ClassTokenForClass(school string, classID int64) (*ClassToken, error) {
-	return s.scanClassToken(s.db.QueryRow(`SELECT token, school, class_id, created_at, last_access
+	return s.scanClassToken(s.db.QueryRow(`SELECT token, school, class_id, person_id, created_at, last_access
 		FROM class_tokens WHERE school=? AND class_id=?`, school, classID))
 }
 
+// ClassTokenForPerson returns the existing personal token for a school+person.
+func (s *Store) ClassTokenForPerson(school string, personID int64) (*ClassToken, error) {
+	return s.scanClassToken(s.db.QueryRow(`SELECT token, school, class_id, person_id, created_at, last_access
+		FROM class_tokens WHERE school=? AND person_id=?`, school, personID))
+}
+
 func (s *Store) ClassTokenByToken(token string) (*ClassToken, error) {
-	return s.scanClassToken(s.db.QueryRow(`SELECT token, school, class_id, created_at, last_access
+	return s.scanClassToken(s.db.QueryRow(`SELECT token, school, class_id, person_id, created_at, last_access
 		FROM class_tokens WHERE token=?`, token))
 }
 
 func (s *Store) scanClassToken(row *sql.Row) (*ClassToken, error) {
 	var t ClassToken
-	err := row.Scan(&t.Token, &t.School, &t.ClassID, &t.CreatedAt, &t.LastAccess)
+	err := row.Scan(&t.Token, &t.School, &t.ClassID, &t.PersonID, &t.CreatedAt, &t.LastAccess)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
