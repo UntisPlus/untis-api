@@ -1,0 +1,16 @@
+services:
+  untis-proxy:
+    image: datpersothere/untis-proxy:latest
+    container_name: untis-proxy
+    restart: unless-stopped
+    ports:
+      - "8509:8509"
+    environment:
+      UNTIS_ADDR: ":8509"
+      UNTIS_SERVER: "schuldorf.webuntis.com"
+      UNTIS_SCHOOL: "schuldorf"
+      UNTIS_ENV: "prod"
+      UNTIS_VERSION: "v1.2.0"
+      UNTIS_POLL_INTERVAL: "60s"
+    volumes:
+      - ./data:/data
