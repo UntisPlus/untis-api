@@ -12,6 +12,7 @@ services:
       UNTIS_SCHOOL: "schuldorf"
       UNTIS_ENV: "prod"
       UNTIS_VERSION: "v1.1.0"
+      UNTIS_POLL_INTERVAL: "60s"
     volumes:
       - ./data:/data
     labels:

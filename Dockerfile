@@ -24,7 +24,8 @@ ENV UNTIS_ADDR=:8509 \
     UNTIS_SCHOOL=schuldorf \
     UNTIS_DB=/data/untis.db \
     UNTIS_ENV=prod \
-    UNTIS_VERSION=dev
+    UNTIS_VERSION=dev \
+    UNTIS_POLL_INTERVAL=60s
 
 EXPOSE 8509
-CMD ["sh", "-c", "untis-server -addr \"$UNTIS_ADDR\" -server \"$UNTIS_SERVER\" -school \"$UNTIS_SCHOOL\" -db \"$UNTIS_DB\" -env \"$UNTIS_ENV\" -version \"$UNTIS_VERSION\""]
+CMD ["sh", "-c", "untis-server -addr \"$UNTIS_ADDR\" -server \"$UNTIS_SERVER\" -school \"$UNTIS_SCHOOL\" -db \"$UNTIS_DB\" -env \"$UNTIS_ENV\" -version \"$UNTIS_VERSION\" -poll-interval \"$UNTIS_POLL_INTERVAL\""]
