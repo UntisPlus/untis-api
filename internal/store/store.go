@@ -107,6 +107,31 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS timetable_versions (
+		school TEXT NOT NULL,
+		class_id INTEGER NOT NULL,
+		version INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (school, class_id)
+	)`)
+	if err != nil {
+		return nil, err
+	}
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS timetable_changes (
+		school TEXT NOT NULL,
+		class_id INTEGER NOT NULL,
+		period_id INTEGER NOT NULL,
+		kind TEXT NOT NULL DEFAULT 'ADDED',
+		start TEXT NOT NULL DEFAULT '',
+		end TEXT NOT NULL DEFAULT '',
+		subject TEXT NOT NULL DEFAULT '',
+		room TEXT NOT NULL DEFAULT '',
+		description TEXT NOT NULL DEFAULT '',
+		mod_ver INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (school, class_id, period_id)
+	)`)
+	if err != nil {
+		return nil, err
+	}
 	return &Store{db: db}, nil
 }
 
@@ -338,12 +363,6 @@ func (s *Store) ClassTokenByToken(token string) (*ClassToken, error) {
 		FROM class_tokens WHERE token=?`, token))
 }
 
-// TouchClassToken updates the last-access timestamp of an existing token.
-func (s *Store) TouchClassToken(token string, at int64) error {
-	_, err := s.db.Exec(`UPDATE class_tokens SET last_access=? WHERE token=?`, at, token)
-	return err
-}
-
 func (s *Store) scanClassToken(row *sql.Row) (*ClassToken, error) {
 	var t ClassToken
 	err := row.Scan(&t.Token, &t.School, &t.ClassID, &t.CreatedAt, &t.LastAccess)
@@ -354,4 +373,158 @@ func (s *Store) scanClassToken(row *sql.Row) (*ClassToken, error) {
 		return nil, err
 	}
 	return &t, nil
+}
+
+// TouchClassToken updates the last-access timestamp of an existing token.
+func (s *Store) TouchClassToken(token string, at int64) error {
+	_, err := s.db.Exec(`UPDATE class_tokens SET last_access=? WHERE token=?`, at, token)
+	return err
+}
+
+// PeriodRow is the persistent snapshot of one period used for change detection.
+type PeriodRow struct {
+	PeriodID    int64
+	Kind        string // ADDED, CHANGED or REMOVED
+	Start       string
+	End         string
+	Subject     string
+	Room        string
+	Description string
+	ModVer      int64
+}
+
+func (s *Store) ClassVersion(school string, classID int64) int64 {
+	var v int64
+	_ = s.db.QueryRow(`SELECT version FROM timetable_versions WHERE school=? AND class_id=?`, school, classID).Scan(&v)
+	return v
+}
+
+// LoadClassSnapshot returns the latest known periods for a class.
+func (s *Store) LoadClassSnapshot(school string, classID int64) ([]PeriodRow, error) {
+	rows, err := s.db.Query(`SELECT period_id, kind, start, end, subject, room, description, mod_ver
+		FROM timetable_changes WHERE school=? AND class_id=? ORDER BY period_id`, school, classID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PeriodRow
+	for rows.Next() {
+		var r PeriodRow
+		if err := rows.Scan(&r.PeriodID, &r.Kind, &r.Start, &r.End, &r.Subject, &r.Room, &r.Description, &r.ModVer); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ReplaceClassSnapshot transactionally rewrites the snapshot for a class. It
+// returns the updated period rows (with new mod versions bumped) and the number
+// of rows whose mod version changed. Removed periods whose start date is before
+// dropRemovedBefore (format YYYY-MM-DD) are silently deleted rather than being
+// reported, so periods that merely age out of the sliding fetch window do not
+// trigger spurious REMOVED notifications.
+func (s *Store) ReplaceClassSnapshot(school string, classID int64, next []PeriodRow, newVer int64, dropRemovedBefore string) (int, error) {
+	old, err := s.LoadClassSnapshot(school, classID)
+	if err != nil {
+		return 0, err
+	}
+	oldByID := map[int64]PeriodRow{}
+	for _, r := range old {
+		oldByID[r.PeriodID] = r
+	}
+	changed := 0
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM timetable_changes WHERE school=? AND class_id=?`, school, classID); err != nil {
+		return 0, err
+	}
+	for _, r := range next {
+		prev, existed := oldByID[r.PeriodID]
+		cur := r
+		if existed && prev.Start == r.Start && prev.End == r.End &&
+			prev.Subject == r.Subject && prev.Room == r.Room && prev.Description == r.Description {
+			cur.Kind = "UNCHANGED"
+			cur.ModVer = prev.ModVer
+		} else {
+			cur.ModVer = newVer
+			if existed {
+				cur.Kind = "CHANGED"
+			} else {
+				cur.Kind = "ADDED"
+			}
+			changed++
+		}
+		oldByID[r.PeriodID] = cur
+		if cur.Kind == "UNCHANGED" {
+			// keep existing row; preserve old values
+			cur.Start, cur.End, cur.Subject, cur.Room, cur.Description = prev.Start, prev.End, prev.Subject, prev.Room, prev.Description
+			rows, err := tx.Exec(`INSERT INTO timetable_changes (school,class_id,period_id,kind,start,end,subject,room,description,mod_ver)
+				VALUES (?,?,?,?,?,?,?,?,?,?)`, school, classID, r.PeriodID, cur.Kind, cur.Start, cur.End, cur.Subject, cur.Room, cur.Description, cur.ModVer)
+			if err != nil {
+				return 0, err
+			}
+			_ = rows
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO timetable_changes (school,class_id,period_id,kind,start,end,subject,room,description,mod_ver)
+			VALUES (?,?,?,?,?,?,?,?,?,?)`, school, classID, cur.PeriodID, cur.Kind, cur.Start, cur.End, cur.Subject, cur.Room, cur.Description, cur.ModVer); err != nil {
+			return 0, err
+		}
+	}
+	// mark periods present in old but absent from new as REMOVED
+	seen := map[int64]bool{}
+	for _, r := range next {
+		seen[r.PeriodID] = true
+	}
+	for pid, r := range oldByID {
+		if seen[pid] {
+			continue
+		}
+		// silently drop past periods that left the window
+		if dropRemovedBefore != "" && len(r.Start) >= 10 && r.Start[:10] < dropRemovedBefore {
+			continue
+		}
+		r.Kind = "REMOVED"
+		r.ModVer = newVer
+		if _, err := tx.Exec(`INSERT INTO timetable_changes (school,class_id,period_id,kind,start,end,subject,room,description,mod_ver)
+			VALUES (?,?,?,?,?,?,?,?,?,?)`, school, classID, pid, r.Kind, r.Start, r.End, r.Subject, r.Room, r.Description, r.ModVer); err != nil {
+			return 0, err
+		}
+		changed++
+	}
+	if changed > 0 {
+		if _, err := tx.Exec(`INSERT INTO timetable_versions (school,class_id,version) VALUES (?,?,?)
+			ON CONFLICT(school,class_id) DO UPDATE SET version=excluded.version`, school, classID, newVer); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return changed, nil
+}
+
+// PendingChanges returns the periods modified after the given version, plus the
+// current class version.
+func (s *Store) PendingChanges(school string, classID int64, since int64) ([]PeriodRow, int64, error) {
+	rows, err := s.db.Query(`SELECT period_id, kind, start, end, subject, room, description, mod_ver
+		FROM timetable_changes WHERE school=? AND class_id=? AND mod_ver>?
+		ORDER BY period_id`, school, classID, since)
+	if err != nil {
+		return nil, s.ClassVersion(school, classID), err
+	}
+	defer rows.Close()
+	var out []PeriodRow
+	for rows.Next() {
+		var r PeriodRow
+		if err := rows.Scan(&r.PeriodID, &r.Kind, &r.Start, &r.End, &r.Subject, &r.Room, &r.Description, &r.ModVer); err != nil {
+			return nil, s.ClassVersion(school, classID), err
+		}
+		out = append(out, r)
+	}
+	return out, s.ClassVersion(school, classID), rows.Err()
 }

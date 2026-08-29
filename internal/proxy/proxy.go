@@ -39,6 +39,8 @@ type Proxy struct {
 
 	mdJSONMu sync.Mutex
 	mdJSON   []byte
+
+	hub *notifyHub
 }
 
 // masterDataCache holds name lookups from getUserData2017 masterData, used to
@@ -64,6 +66,7 @@ func New(st *store.Store, uc *untis.Client, sm *session.Manager, opts Options) *
 		secrets:  map[string]string{},
 		recon:    newElementDB(),
 		md:       &masterDataCache{},
+		hub:      newNotifyHub(),
 	}
 }
 
@@ -154,6 +157,8 @@ func (p *Proxy) Handler() http.Handler {
 	mux.HandleFunc("/status", p.handleStatus)
 	mux.HandleFunc("POST /api/calendar/token", p.handleCalendarToken)
 	mux.HandleFunc("GET /api/calendar/{token}", p.handleCalendarICS)
+	mux.HandleFunc("GET /api/timetable/changes", p.handleTimetableChanges)
+	mux.HandleFunc("GET /api/timetable/stream", p.handleTimetableStream)
 	return mux
 }
 

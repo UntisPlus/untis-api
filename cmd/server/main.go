@@ -27,6 +27,7 @@ func main() {
 	yearEnd := flag.String("year-end", "", "school year end override (default: auto-derived)")
 	env := flag.String("env", "", "deployment mode (dev|beta|prod); defaults to UNTIS_ENV, else dev")
 	version := flag.String("version", "dev", "reported build version")
+	poll := flag.Duration("poll-interval", 60*time.Second, "timetable change-detection poll interval")
 	flag.Parse()
 
 	if *env != "" {
@@ -59,6 +60,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	pollDone := make(chan struct{})
+	go p.StartPollLoop(*school, *poll, pollDone)
+
 	srv := &http.Server{Addr: *addr, Handler: p.Handler()}
 	log.Printf("listening on %s (upstream %s, school %s)", *addr, *server, *school)
 
@@ -77,6 +81,7 @@ func main() {
 		}
 	}
 
+	close(pollDone)
 	p.PersistRecon()
 	if err := st.Close(); err != nil {
 		log.Printf("close store: %v", err)

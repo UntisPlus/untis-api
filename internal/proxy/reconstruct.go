@@ -94,11 +94,24 @@ func (e *elementDB) has(elType string, id int64) bool {
 // fetchClassChunk fetches one class timetable over a single (<=2 week) chunk,
 // using the class owner's account. Results are cached by class+range.
 func (p *Proxy) fetchClassChunk(school string, classID int64, start, end string) ([]map[string]any, error) {
+	return p.fetchClassChunkMode(school, classID, start, end, false)
+}
+
+// fetchClassChunkFresh is fetchClassChunk but forces an upstream fetch,
+// bypassing the in-memory TTL cache. Used by the change-detection poller so it
+// always sees current data.
+func (p *Proxy) fetchClassChunkFresh(school string, classID int64, start, end string) ([]map[string]any, error) {
+	return p.fetchClassChunkMode(school, classID, start, end, true)
+}
+
+func (p *Proxy) fetchClassChunkMode(school string, classID int64, start, end string, fresh bool) ([]map[string]any, error) {
 	key := fmt.Sprintf("recon|%d|%s|%s", classID, start, end)
-	if v, ok := p.tt.Get(key); ok {
-		var out []map[string]any
-		if err := json.Unmarshal(v, &out); err == nil {
-			return out, nil
+	if !fresh {
+		if v, ok := p.tt.Get(key); ok {
+			var out []map[string]any
+			if err := json.Unmarshal(v, &out); err == nil {
+				return out, nil
+			}
 		}
 	}
 	owner, err := p.store.OwnerForClass(classID)
@@ -179,6 +192,31 @@ func (p *Proxy) classPeriods(school string, classID int64, start, end string) ([
 	var out []map[string]any
 	for _, c := range chunks {
 		ps, err := p.fetchClassChunk(school, classID, c[0], c[1])
+		if err != nil {
+			return nil, err
+		}
+		for _, pd := range ps {
+			pid, _ := pd["id"].(float64)
+			if seen[int64(pid)] {
+				continue
+			}
+			seen[int64(pid)] = true
+			out = append(out, pd)
+		}
+	}
+	return out, nil
+}
+
+// classPeriodsFresh is classPeriods but forces fresh upstream data (no cache).
+func (p *Proxy) classPeriodsFresh(school string, classID int64, start, end string) ([]map[string]any, error) {
+	chunks, err := chunkDates(start, end)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[int64]bool{}
+	var out []map[string]any
+	for _, c := range chunks {
+		ps, err := p.fetchClassChunkFresh(school, classID, c[0], c[1])
 		if err != nil {
 			return nil, err
 		}
