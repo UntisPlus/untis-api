@@ -2,10 +2,18 @@ package store
 
 import (
 	"database/sql"
+	"log"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+// norm normalizes a username so the same account is always keyed identically
+// regardless of how the client capitalizes it (usernames are case-insensitive).
+func norm(username string) string {
+	return strings.ToLower(strings.TrimSpace(username))
+}
 
 type User struct {
 	ID          int64
@@ -139,7 +147,170 @@ func Open(path string) (*Store, error) {
 	if err := addColumnIfMissing(db, "class_tokens", "person_id", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	st := &Store{db: db}
+	if err := st.normalizeUsernames(); err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+
+// normalizeUsernames merges accounts whose usernames differ only by case into a
+// single lowercase-canonical account (usernames are case-insensitive). The most
+// recently active variant wins for profile data; secrets and permission flags
+// are merged across all variants.
+func (s *Store) normalizeUsernames() error {
+	rows, err := s.db.Query(`SELECT username FROM users ORDER BY last_seen DESC, id DESC`)
+	if err != nil {
+		return err
+	}
+	type dup struct{ name string }
+	var dups []string
+	canonical := map[string]string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		key := norm(name)
+		if _, ok := canonical[key]; !ok {
+			canonical[key] = name
+		} else {
+			dups = append(dups, name)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(dups) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	for _, name := range dups {
+		key := norm(name)
+		can := canonical[key]
+		if can == name {
+			continue
+		}
+		// Canonicalize the surviving account's username to lowercase so future
+		// lookups (also normalized) hit it regardless of input case.
+		low := norm(name)
+		// Merge secret: keep the newest non-empty secret among the variants.
+		var sec string
+		var t time.Time
+		if err := s.loadSecretRow(tx, can, &sec, &t); err != nil {
+			tx.Rollback()
+			return err
+		}
+		var sec2 string
+		var t2 time.Time
+		if err := s.loadSecretRow(tx, name, &sec2, &t2); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if sec2 != "" && (sec == "" || t2.After(t)) {
+			sec, t = sec2, t2
+		}
+		secretRow := sec
+
+		// Merge perms: OR both sides; if a conflict somehow pits boosted vs
+		// recon (should not happen — XOR is enforced per user), boosted wins.
+		perms := map[string]bool{}
+		if err := s.loadPerms(tx, can, perms); err != nil {
+			tx.Rollback()
+			return err
+		}
+		dupPerms := map[string]bool{}
+		if err := s.loadPerms(tx, name, dupPerms); err != nil {
+			tx.Rollback()
+			return err
+		}
+		for f, v := range dupPerms {
+			perms[f] = perms[f] || v
+		}
+		if perms[FeatureRecon] && perms[FeatureBoosted] {
+			perms[FeatureRecon] = false
+		}
+
+		// Collapse the variant account into the canonical one.
+		if _, err := tx.Exec(`DELETE FROM users WHERE username=?`, name); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM secrets WHERE username=?`, name); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM perms WHERE username=? AND username<>?`, name, globalPermUser); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if secretRow != "" {
+			if _, err := tx.Exec(`INSERT OR REPLACE INTO secrets (username, secret, updated_at) VALUES (?,?,?)`,
+				low, secretRow, t.Unix()); err != nil {
+				tx.Rollback()
+				return err
+			}
+		}
+		for f, v := range perms {
+			allow := 0
+			if v {
+				allow = 1
+			}
+			if _, err := tx.Exec(`INSERT OR REPLACE INTO perms (username, feature, allowed) VALUES (?,?,?)`,
+				low, f, allow); err != nil {
+				tx.Rollback()
+				return err
+			}
+		}
+		if _, err := tx.Exec(`UPDATE users SET username=? WHERE username=?`, low, can); err != nil {
+			tx.Rollback()
+			return err
+		}
+		canonical[key] = low
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	log.Printf("merged %d case-insensitive duplicate account(s)", len(dups))
+	return nil
+}
+
+func (s *Store) loadSecretRow(tx *sql.Tx, username string, sec *string, t *time.Time) error {
+	var at int64
+	*sec = ""
+	*t = time.Time{}
+	err := tx.QueryRow(`SELECT secret, updated_at FROM secrets WHERE username=?`, username).Scan(sec, &at)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	*t = time.Unix(at, 0)
+	return nil
+}
+
+func (s *Store) loadPerms(tx *sql.Tx, username string, out map[string]bool) error {
+	rows, err := tx.Query(`SELECT feature, allowed FROM perms WHERE username=?`, username)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var f string
+		var v int
+		if err := rows.Scan(&f, &v); err != nil {
+			return err
+		}
+		out[f] = v != 0
+	}
+	return rows.Err()
 }
 
 // addColumnIfMissing adds a column to a table if it does not already exist.
@@ -163,6 +334,7 @@ func addColumnIfMissing(db *sql.DB, table, column, ddl string) error {
 }
 
 func (s *Store) UpsertSecret(username, secret string) error {
+	username = norm(username)
 	_, err := s.db.Exec(`INSERT INTO secrets (username, secret, updated_at) VALUES (?,?,?)
 		ON CONFLICT(username) DO UPDATE SET secret=excluded.secret, updated_at=excluded.updated_at`,
 		username, secret, time.Now().Unix())
@@ -171,7 +343,7 @@ func (s *Store) UpsertSecret(username, secret string) error {
 
 func (s *Store) GetSecret(username string) (string, error) {
 	var sec string
-	err := s.db.QueryRow(`SELECT secret FROM secrets WHERE username=?`, username).Scan(&sec)
+	err := s.db.QueryRow(`SELECT secret FROM secrets WHERE username=?`, norm(username)).Scan(&sec)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -203,7 +375,7 @@ var BoostFeatures = []string{FeatureBoosted}
 // allowed. Global switches do not count.
 func (s *Store) HasPerm(username, feature string) (bool, error) {
 	var v int
-	row := s.db.QueryRow(`SELECT allowed FROM perms WHERE username=? AND feature=?`, username, feature)
+	row := s.db.QueryRow(`SELECT allowed FROM perms WHERE username=? AND feature=?`, norm(username), feature)
 	if err := row.Scan(&v); err != nil {
 		if err == sql.ErrNoRows {
 			return false, nil
@@ -219,7 +391,7 @@ func (s *Store) HasPerm(username, feature string) (bool, error) {
 func (s *Store) ReconAccess(username, elType string) (bool, error) {
 	_ = elType
 	var v int
-	row := s.db.QueryRow(`SELECT allowed FROM perms WHERE username=? AND feature=?`, username, FeatureRecon)
+	row := s.db.QueryRow(`SELECT allowed FROM perms WHERE username=? AND feature=?`, norm(username), FeatureRecon)
 	if err := row.Scan(&v); err == nil {
 		return v != 0, nil
 	}
@@ -262,6 +434,7 @@ func (s *Store) SetBoostedFlag(username string, allowed bool) error {
 }
 
 func (s *Store) setPerm(username, elType string, allowed bool) error {
+	username = norm(username)
 	// Reconstruction is mutually exclusive with Boosted: granting one side
 	// revokes the other side for the same user. The global switch ("*") is not a
 	// real user, so exclusion only applies to per-user overrides.
@@ -285,6 +458,7 @@ func (s *Store) setPerm(username, elType string, allowed bool) error {
 }
 
 func (s *Store) setPermFalse(username, feature string) error {
+	username = norm(username)
 	_, err := s.db.Exec(`INSERT INTO perms (username, feature, allowed) VALUES (?,?,0)
 		ON CONFLICT(username, feature) DO UPDATE SET allowed=0`, username, feature)
 	return err
@@ -294,7 +468,7 @@ func (s *Store) setPermFalse(username, feature string) error {
 // username so they fall back to the global switches again.
 func (s *Store) ClearReconOverrides(username string) (int64, error) {
 	res, err := s.db.Exec(`DELETE FROM perms WHERE username=? AND username<>?`,
-		username, globalPermUser)
+		norm(username), globalPermUser)
 	if err != nil {
 		return 0, err
 	}
@@ -408,6 +582,7 @@ func (s *Store) UpsertUser(u *User) error {
 	if u.CreatedAt.IsZero() {
 		u.CreatedAt = now
 	}
+	u.Username = norm(u.Username)
 	_, err := s.db.Exec(`INSERT INTO users
 		(username, password, method, person_id, person_type, class_id, class_name, email, display_name, created_at, last_seen)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?)
@@ -428,14 +603,14 @@ func (s *Store) UpsertUser(u *User) error {
 }
 
 func (s *Store) Touch(username string) error {
-	_, err := s.db.Exec(`UPDATE users SET last_seen=? WHERE username=?`, time.Now().Unix(), username)
+	_, err := s.db.Exec(`UPDATE users SET last_seen=? WHERE username=?`, time.Now().Unix(), norm(username))
 	return err
 }
 
 func (s *Store) GetUser(username string) (*User, error) {
 	return s.scanUser(s.db.QueryRow(
 		`SELECT id,username,password,method,person_id,person_type,class_id,class_name,email,display_name,created_at,last_seen FROM users WHERE username=?`,
-		username))
+		norm(username)))
 }
 
 // UserByPersonID returns a user with the given person id, preferring the most
@@ -482,7 +657,7 @@ func (s *Store) OwnerForClass(classID int64) (*User, error) {
 		FROM users WHERE class_id=? AND password<>'' ORDER BY last_seen DESC, id DESC LIMIT 1`, classID))
 }
 
-// BoostedSourceAccounts returns all users with replayable secrets (password <> '')
+// BoostedSourceAccounts returns all users with replayable secrets (password <> ”)
 // who are non-students (person_type != 5). These are the "teacher accounts
 // lying around" that a boosted user draws raw data from.
 func (s *Store) BoostedSourceAccounts() ([]*User, error) {
@@ -531,6 +706,7 @@ func (s *Store) ListUsers() ([]*User, error) {
 // and any personal calendar tokens bound to that person. Global switches are
 // untouched.
 func (s *Store) DeleteUser(username string) (int64, error) {
+	username = norm(username)
 	u, err := s.GetUser(username)
 	if err != nil {
 		return 0, err
