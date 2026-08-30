@@ -358,14 +358,15 @@ func (p *Proxy) markPooledElementsDisplayable(body []byte, username string) []by
 		return out
 	}
 	can, _ := p.store.ReconAccess(username, "TEACHER")
+	boosted := p.isBoosted(username)
 	setDisplayable("teachers", func(id int64) bool {
-		return can && p.recon.has("TEACHER", id)
+		return boosted || (can && p.recon.has("TEACHER", id))
 	}, "displayAllowed")
 	setDisplayable("rooms", func(id int64) bool {
-		return can && p.recon.has("ROOM", id)
+		return boosted || (can && p.recon.has("ROOM", id))
 	}, "displayAllowed")
 	setDisplayable("subjects", func(id int64) bool {
-		return can && p.recon.has("SUBJECT", id)
+		return boosted || (can && p.recon.has("SUBJECT", id))
 	}, "displayAllowed")
 
 	out, err := json.Marshal(m)
