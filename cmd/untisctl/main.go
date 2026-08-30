@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"untis-proxy/internal/store"
+	"untis-proxy/internal/untis"
 )
 
 // untisctl is a small operator tool for managing a running untis-proxy's
@@ -17,6 +19,8 @@ import (
 
 func main() {
 	db := flag.String("db", "untis.db", "path to the untis sqlite database")
+	server := flag.String("server", "schuldorf.webuntis.com", "upstream Untis server")
+	school := flag.String("school", "schuldorf", "upstream school")
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
 		fmt.Fprintf(out, `untisctl – manage an untis-proxy database
@@ -34,6 +38,9 @@ Commands:
   users list                         list accounts
   users add --user U --secret S [--method password|key]
   users remove --user U              delete user + secret + overrides + personal tokens
+  users check [--remove-classless]   ask the real Untis API for each account's class;
+                                     --remove-classless deletes students the API
+                                     reports without a class
 
   pool list                          show pooled classes and their owners
   pool owners                        show which user(s) own each class
@@ -44,7 +51,9 @@ Commands:
   status                             db stats: users, pool, perms, recon, tokens
 
 Global:
-  -db PATH   sqlite database path (default "untis.db")
+  -db PATH        sqlite database path (default "untis.db")
+  -server HOST    upstream Untis server (default schuldorf.webuntis.com)
+  -school NAME    upstream school (default schuldorf)
 
 Run 'untisctl <command> -h' for per-command flags.
 `)
@@ -66,7 +75,7 @@ Run 'untisctl <command> -h' for per-command flags.
 	case "perms":
 		cmdPerms(st, flag.Args()[1:])
 	case "users":
-		cmdUsers(st, flag.Args()[1:])
+		cmdUsers(st, flag.Args()[1:], *server, *school)
 	case "pool":
 		cmdPool(st, flag.Args()[1:])
 	case "tokens":
@@ -237,9 +246,9 @@ func permClear(st *store.Store, args []string) {
 // users
 // ---------------------------------------------------------------------------
 
-func cmdUsers(st *store.Store, args []string) {
+func cmdUsers(st *store.Store, args []string, server, school string) {
 	if len(args) == 0 {
-		fatal("users requires a subcommand (list|add|remove)")
+		fatal("users requires a subcommand (list|add|remove|check)")
 	}
 	switch args[0] {
 	case "list":
@@ -248,6 +257,8 @@ func cmdUsers(st *store.Store, args []string) {
 		userAdd(st, args[1:])
 	case "remove":
 		userRemove(st, args[1:])
+	case "check":
+		userCheck(st, server, school, args[1:])
 	default:
 		fatal("unknown users subcommand %q", args[0])
 	}
@@ -304,6 +315,88 @@ func userRemove(st *store.Store, args []string) {
 		fatal("remove user: %v", err)
 	}
 	fmt.Printf("removed user %q (%d related row(s) cleaned)\n", *user, n)
+}
+
+// userCheck asks the real Untis API what class each stored account belongs to
+// (via a real session from its saved credential). Students the API reports as
+// having no class are flagged CLASSLESS; with --remove-classless they are
+// deleted. Teachers (personType != 5) are never deleted.
+func userCheck(st *store.Store, server, school string, args []string) {
+	fs := flag.NewFlagSet("users check", flag.ExitOnError)
+	remove := fs.Bool("remove-classless", false, "delete student accounts the API reports without a class")
+	fs.Parse(args)
+
+	users, err := st.ListUsers()
+	if err != nil {
+		fatal("users check: %v", err)
+	}
+	uc := untis.New(untis.Config{Server: server, School: school})
+
+	// Build id -> name from whichever account can fetch the class list.
+	klassen := map[int64]string{}
+	for _, u := range users {
+		if u.Password == "" {
+			continue
+		}
+		ck, err := uc.Session(school, u.Username, u.Password, u.Method)
+		if err != nil {
+			continue
+		}
+		if b, err := uc.GetKlassen(school, ck); err == nil {
+			var res struct {
+				Result []struct {
+					ID   int64  `json:"id"`
+					Name string `json:"name"`
+				} `json:"result"`
+			}
+			if json.Unmarshal(b, &res) == nil {
+				for _, c := range res.Result {
+					klassen[c.ID] = c.Name
+				}
+			}
+			uc.Logout(school, ck)
+			if len(klassen) > 0 {
+				break
+			}
+		} else {
+			uc.Logout(school, ck)
+		}
+	}
+
+	fmt.Printf("%-12s %-8s %-9s %-9s %-14s %s\n", "USER", "METHOD", "API_TYPE", "CLASS_ID", "CLASS", "VERDICT")
+	removed := 0
+	for _, u := range users {
+		if u.Password == "" {
+			fmt.Printf("%-12s %-8s  (no saved credential, skipped)\n", u.Username, u.Method)
+			continue
+		}
+		ck, err := uc.Session(school, u.Username, u.Password, u.Method)
+		if err != nil {
+			fmt.Printf("%-12s %-8s login failed: %v\n", u.Username, u.Method, err)
+			continue
+		}
+		info, _ := uc.PersonInfo(school, ck)
+		uc.Logout(school, ck)
+
+		verdict := "keep"
+		if info.PersonID == 0 && info.PersonType == 0 && info.ClassID == 0 {
+			verdict = "info unavailable"
+		} else if info.PersonType == 5 && info.ClassID == 0 {
+			verdict = "CLASSLESS"
+			if *remove {
+				if _, err := st.DeleteUser(u.Username); err != nil {
+					fmt.Printf("%-12s remove failed: %v\n", u.Username, err)
+					continue
+				}
+				verdict = "REMOVED"
+				removed++
+			}
+		}
+		fmt.Printf("%-12s %-8s %-9d %-9d %-14s %s\n", u.Username, u.Method, info.PersonType, info.ClassID, klassen[info.ClassID], verdict)
+	}
+	if removed > 0 {
+		fmt.Printf("removed %d classless account(s)\n", removed)
+	}
 }
 
 // ---------------------------------------------------------------------------
