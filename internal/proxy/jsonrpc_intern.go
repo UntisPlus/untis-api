@@ -344,8 +344,19 @@ func (p *Proxy) markPooledElementsDisplayable(body []byte, username string) []by
 		}
 	}
 	setDisplayable("klassen", func(id int64) bool { return pooled[id] }, "displayable")
-	// Reconstruction elements (teachers/rooms/subjects) are only made
-	// displayable to users who hold the recon permission.
+	// Teacher accounts (non-students) behave like the stock WebUntis API:
+	// leave their teacher/room/subject displayAllowed flags untouched. For
+	// students, reconstructed elements are only made displayable to users who
+	// hold the recon permission.
+	requester, _ := p.store.GetUser(username)
+	isStudent := requester != nil && requester.PersonType == 5
+	if !isStudent {
+		out, err := json.Marshal(m)
+		if err != nil {
+			return body
+		}
+		return out
+	}
 	can, _ := p.store.ReconAccess(username, "TEACHER")
 	setDisplayable("teachers", func(id int64) bool {
 		return can && p.recon.has("TEACHER", id)
@@ -419,7 +430,7 @@ func (p *Proxy) getTimetable2017(w http.ResponseWriter, r *http.Request, school 
 	case "CLASS":
 		classID = pr.ID
 	case "TEACHER", "ROOM", "SUBJECT":
-		p.serveElementTimetable(w, r, school, id, pr)
+		p.serveElementTimetable(w, r, school, id, pr, body)
 		return
 	default:
 		b, status, _, err := p.untis.RawIntern(school, "", "getTimetable2017", body)
@@ -514,7 +525,7 @@ func (p *Proxy) serveElementTimetable(w http.ResponseWriter, r *http.Request, sc
 	Auth      struct {
 		User string `json:"user"`
 	} `json:"auth"`
-}) {
+}, body []byte) {
 	requesterName := pr.Auth.User
 	if requesterName == "" {
 		if u := p.sessionUser(r); u != nil {
@@ -528,6 +539,24 @@ func (p *Proxy) serveElementTimetable(w http.ResponseWriter, r *http.Request, sc
 	requester, err := p.store.GetUser(requesterName)
 	if err != nil || requester == nil {
 		p.writeJSONRPCError(w, id, "not logged in", -8520)
+		return
+	}
+	// A user's own teacher timetable (their own person id) is stock WebUntis
+	// behavior: forward it raw through their own account, never gated by recon.
+	if pr.Type == "TEACHER" && requester.PersonID == pr.ID {
+		cookie, err := p.untis.Session(school, requester.Username, requester.Password, requester.Method)
+		if err != nil {
+			p.writeJSONRPCError(w, id, "no right for timetable", -8509)
+			return
+		}
+		b, status, _, err := p.untis.RawIntern(school, cookie, "getTimetable2017", body)
+		if err != nil {
+			p.writeJSONRPCError(w, id, "no right for timetable", -8509)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write(b)
 		return
 	}
 	// Reconstructed teacher/room/subject timetables are gated per element type
