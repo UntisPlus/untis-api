@@ -16,45 +16,38 @@ func (p *Proxy) handleREST(w http.ResponseWriter, r *http.Request) {
 		school = s
 	}
 	switch r.URL.Path {
-		default:
-			user := p.sessionUser(r)
-			if user == nil {
-				if tok := r.Header.Get("Authorization"); strings.HasPrefix(tok, "Bearer ") {
-					// BetterUntis self-authenticates REST calls via a Bearer token
-					// (from getAuthToken); forward as-is so the real server serves
-					// only that user's own data.
-					if isSensitiveRESTPath(r.URL.Path) {
-						// Block write verbs and absences on sensitive paths for
-						// Bearer requests (we can't verify per-user sub-perms
-						// here without a session, so default to deny).
-						if r.Method == "POST" || r.Method == "PUT" || r.Method == "DELETE" ||
-							strings.Contains(r.URL.Path, "/absences/") {
-							p.forbidden(w)
-							return
-						}
-					}
-					b, status, err := p.untis.RESTGetToken(school, tok, r.URL.Path, r.URL.RawQuery)
-					if err != nil {
-						p.forbidden(w)
-						return
-					}
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(status)
-					_, _ = w.Write(b)
-					return
-				}
-				p.forbidden(w)
-				return
-			}
-		// Session path: gate absences and write methods per sub-perm.
-		if isSensitiveRESTPath(r.URL.Path) {
-			if r.Method == "POST" || r.Method == "PUT" || r.Method == "DELETE" {
-				if !p.hasWrites(user.Username) {
+	case "/WebUntis/api/public/timetable/weekly/data":
+		p.restWeeklyTimetable(w, r, school)
+	default:
+		user := p.sessionUser(r)
+		if user == nil {
+			if tok := r.Header.Get("Authorization"); strings.HasPrefix(tok, "Bearer ") {
+				// BetterUntis self-authenticates REST calls via a Bearer token
+				// (from getAuthToken); forward as-is so the real server serves
+				// only that user's own data. We have no session identity here,
+				// so write verbs are denied by default; absence GETs (own data)
+				// are allowed.
+				if r.Method == "POST" || r.Method == "PUT" || r.Method == "DELETE" {
 					p.forbidden(w)
 					return
 				}
-			} else if strings.Contains(r.URL.Path, "/absences/") && !p.hasAbsences(user.Username) {
-				// GET absences also blocked without absences sub-perm
+				b, status, err := p.untis.RESTGetToken(school, tok, r.URL.Path, r.URL.RawQuery)
+				if err != nil {
+					p.forbidden(w)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_, _ = w.Write(b)
+				return
+			}
+			p.forbidden(w)
+			return
+		}
+		// Session path: write verbs are gated by the boosted flag. Reading
+		// your own absences (GET) is always allowed.
+		if r.Method == "POST" || r.Method == "PUT" || r.Method == "DELETE" {
+			if !p.isBoosted(user.Username) {
 				p.forbidden(w)
 				return
 			}

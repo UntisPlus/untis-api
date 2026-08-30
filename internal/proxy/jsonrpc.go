@@ -130,11 +130,7 @@ func (p *Proxy) passthrough(w http.ResponseWriter, r *http.Request, school strin
 		return
 	}
 	method := extractMethod(body)
-	if isAbsenceMethod(method) && !p.hasAbsences(user.Username) {
-		p.writeJSONRPCError(w, idOf(body), "method not allowed", -32601)
-		return
-	}
-	if isWriteMethod(method) && !p.hasWrites(user.Username) {
+	if isWriteMethod(method) && !p.isBoosted(user.Username) {
 		p.writeJSONRPCError(w, idOf(body), "method not allowed", -32601)
 		return
 	}

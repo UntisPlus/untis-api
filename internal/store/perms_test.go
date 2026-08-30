@@ -50,14 +50,9 @@ func TestReconBoostedMutualExclusion(t *testing.T) {
 	if v, _ := st.ReconAccess("alice", "TEACHER"); !v { t.Fatal("recon should be granted") }
 	if in, err := st.BoostedAccess("alice"); err != nil || in { t.Fatal("recon should revoke boosted") }
 
-	// Absences implies boosted access (and revokes recon)
-	if err := st.SetAbsencesFlag("bob", true); err != nil { t.Fatal(err) }
-	if in, err := st.BoostedAccess("bob"); err != nil || !in { t.Fatal("absences should imply boosted") }
-	if v, _ := st.ReconAccess("bob", "TEACHER"); v { t.Fatal("absences should revoke recon") }
-
-	// Writes implies boosted access
-	st2, _ := Open(t.TempDir() + "/t.db")
-	defer st2.Close()
-	if err := st2.SetWritesFlag("carol", true); err != nil { t.Fatal(err) }
-	if in, err := st2.BoostedAccess("carol"); err != nil || !in { t.Fatal("writes should imply boosted") }
+	// Revoking boosted restores nothing automatically, but revoking recon
+	// leaves the user free to be boosted again.
+	if err := st.SetReconOverride("alice", "TEACHER", false); err != nil { t.Fatal(err) }
+	if err := st.SetBoostedFlag("alice", true); err != nil { t.Fatal(err) }
+	if in, err := st.BoostedAccess("alice"); err != nil || !in { t.Fatal("re-granting boosted after clearing recon should work") }
 }

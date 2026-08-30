@@ -189,20 +189,15 @@ const (
 	FeatureRecon = "recon"
 	// FeatureBoosted grants raw forwarding of all class/teacher/room/subject
 	// timetables through a saved teacher account (own personal timetable and the
-	// info center still use the user's own account).
+	// info center still use the user's own account) plus the absence/write edit
+	// methods. Reading your own absences is always allowed.
 	FeatureBoosted = "boosted"
-	// FeatureAbsences grants access to absence-checking methods (info center).
-	// It also implies Boosted raw timetable behavior.
-	FeatureAbsences = "absences"
-	// FeatureWrites grants access to lesson/subject write methods. It also
-	// implies Boosted raw timetable behavior.
-	FeatureWrites = "writes"
 )
 
 // BoostFeatures are the per-user features that imply Boosted raw timetable
-// access (full teacher-account forwarding). They are mutually exclusive with
-// the reconstruction flag.
-var BoostFeatures = []string{FeatureBoosted, FeatureAbsences, FeatureWrites}
+// access (full teacher-account forwarding) plus absence/write editing. They are
+// mutually exclusive with the reconstruction flag.
+var BoostFeatures = []string{FeatureBoosted}
 
 // HasPerm reports whether a user has an explicit per-user permission row set to
 // allowed. Global switches do not count.
@@ -260,34 +255,22 @@ func (s *Store) SetReconOverride(username, elType string, allowed bool) error {
 	return s.setPerm(username, FeatureRecon, allowed)
 }
 
-// SetBoostedFlag grants or revokes the boosted (raw teacher forwarding) flag.
+// SetBoostedFlag grants or revokes the boosted (raw teacher forwarding +
+// absence/write editing) flag.
 func (s *Store) SetBoostedFlag(username string, allowed bool) error {
 	return s.setPerm(username, FeatureBoosted, allowed)
 }
 
-// SetAbsencesFlag grants or revokes the absences sub-perm.
-func (s *Store) SetAbsencesFlag(username string, allowed bool) error {
-	return s.setPerm(username, FeatureAbsences, allowed)
-}
-
-// SetWritesFlag grants or revokes the writes sub-perm.
-func (s *Store) SetWritesFlag(username string, allowed bool) error {
-	return s.setPerm(username, FeatureWrites, allowed)
-}
-
 func (s *Store) setPerm(username, elType string, allowed bool) error {
-	// Reconstruction is mutually exclusive with the Boosted features (boosted,
-	// absences, writes): granting one side revokes the other side for the same
-	// user. The global switch ("*") is not a real user, so exclusion only
-	// applies to per-user overrides.
+	// Reconstruction is mutually exclusive with Boosted: granting one side
+	// revokes the other side for the same user. The global switch ("*") is not a
+	// real user, so exclusion only applies to per-user overrides.
 	if username != globalPermUser && allowed {
 		if elType == FeatureRecon {
-			// Granting reconstruction revokes all boosted features.
-			for _, f := range BoostFeatures {
-				_ = s.setPermFalse(username, f)
-			}
+			// Granting reconstruction revokes boosted.
+			_ = s.setPermFalse(username, FeatureBoosted)
 		} else {
-			// Granting a boosted feature revokes reconstruction.
+			// Granting boosted revokes reconstruction.
 			_ = s.setPermFalse(username, FeatureRecon)
 		}
 	}

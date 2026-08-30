@@ -98,28 +98,24 @@ go build ./cmd/untisctl
 (The `-db` default is `untis.db`; the binary is also baked into the Docker
 image as `/usr/local/bin/untisctl`.)
 
-### perms — tiers: Basic / Reconstruction / Boosted (+ absences & writes)
+### perms — tiers: Basic / Reconstruction / Boosted
 
-Access follows a three-tier model plus two sub-permissions:
+Access follows a two-flag tier model:
 
 | Tier | Flag | Scope | What you get |
 |---|---|---|---|
-| **Basic** | *(none)* | everyone by default | Pool of classes + your own personal student timetable. |
+| **Basic** | *(none)* | everyone by default | Pool of classes + your own personal student timetable + **reading your own absences**. |
 | **Reconstruction** | `recon` | global switch **or** per-user override | Teacher / room / subject timetables **reconstructed 100% from pooled class data**. |
-| **Boosted** | `boosted` | per-user only | Class/teacher/room/subject timetables **raw-forwarded through any saved teacher account** — no reconstruction. Your own personal (STUDENT) timetable stays on your own account. |
-| Sub-perm: **absences** | `absences` | per-user only | Absence-checking methods (info center). Also implies Boosted raw behavior. |
-| Sub-perm: **writes** | `writes` | per-user only | Lesson/subject write methods (set/add/update/delete/change). Also implies Boosted raw behavior. |
+| **Boosted** | `boosted` | per-user only | Class/teacher/room/subject timetables **raw-forwarded through any saved teacher account** — no reconstruction. Your own personal (STUDENT) timetable stays on your own account. Also **unlocks absence + lesson/subject write (editing) methods**. |
 
-**Boosted XOR Recon**: `boosted`/`absences`/`writes` and `recon` are mutually
-exclusive per user — granting one side auto-revokes the other.
+**Boosted XOR Recon**: the flags are mutually exclusive per user — granting one
+auto-revokes the other.
 
 ```sh
 untisctl perms list                              # show global switches + overrides
 untisctl perms grant --global recon              # enable recon for everyone
 untisctl perms grant --user Evadee recon         # per-user override
-untisctl perms grant --user Evadee boosted       # per-user boosted (raw forwarding)
-untisctl perms grant --user X absences           # allow absence methods
-untisctl perms grant --user X writes             # allow lesson/subject write methods
+untisctl perms grant --user Evadee boosted       # per-user boosted (raw + editing)
 untisctl perms clear --user Evadee               # drop overrides -> fall back to global
 untisctl perms reset                             # wipe all -> Basic for everyone
 ```
@@ -127,7 +123,12 @@ untisctl perms reset                             # wipe all -> Basic for everyon
 > Flags come **before** the positional type: `perms grant --user X recon`
 > (Go's `flag` package does not intersperse flags after positionals).
 
-The `boosted`/`absences`/`writes` features are **per-user only** (no `--global`).
+The `boosted` flag is **per-user only** (no `--global`).
+
+Absence **reads** (own data, e.g. `getOwnAbsence`, `getPersonAbsence`,
+`getStudentAbsences2017`) are available to **everyone** by default; only the
+**write/mutation** methods (`set`/`add`/`update`/`delete`/`change` prefixes) need
+`boosted`.
 
 In the app, classes are always shown; **teacher/room/subject element types are
 hidden unless the user has recon or is boosted** (the masterData `displayAllowed`

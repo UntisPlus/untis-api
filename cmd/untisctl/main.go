@@ -27,7 +27,7 @@ Usage:
 Commands:
   perms list [--user U]              show global switches and per-user overrides
   perms grant|revoke [--user U|--global] TYPE
-                                     grant/revoke recon|boosted|absences|writes (boosted*/absences/writes are per-user only)
+                                     grant/revoke recon|boosted (boosted is per-user only)
   perms clear --user U               drop a user's overrides (fall back to global)
   perms reset                        wipe all permissions (class-pool-only default)
 
@@ -92,17 +92,11 @@ var reconTypes = map[string]string{
 	"reconstruction": store.FeatureRecon,
 	"boosted":        store.FeatureBoosted,
 	"boost":          store.FeatureBoosted,
-	"absences":       store.FeatureAbsences,
-	"absence":        store.FeatureAbsences,
-	"writes":         store.FeatureWrites,
-	"write":          store.FeatureWrites,
 }
 
 // boostedFeatures are per-user-only permissions; they cannot be applied globally.
 var boostedFeatures = map[string]bool{
-	store.FeatureBoosted:  true,
-	store.FeatureAbsences: true,
-	store.FeatureWrites:   true,
+	store.FeatureBoosted: true,
 }
 
 func cmdPerms(st *store.Store, args []string) {
@@ -180,7 +174,7 @@ func permSet(st *store.Store, action string, args []string) {
 	}
 	typ, ok := reconTypes[strings.ToLower(rest[0])]
 	if !ok {
-		fatal("unknown type %q (use recon|boosted|absences|writes)", rest[0])
+		fatal("unknown type %q (use recon|boosted)", rest[0])
 	}
 	if *user != "" && *global {
 		fatal("pick --user (per-user) or --global (all users), not both")
@@ -197,10 +191,6 @@ func permSet(st *store.Store, action string, args []string) {
 		err = st.SetReconType(typ, allowed)
 	} else if typ == store.FeatureBoosted {
 		err = st.SetBoostedFlag(*user, allowed)
-	} else if typ == store.FeatureAbsences {
-		err = st.SetAbsencesFlag(*user, allowed)
-	} else if typ == store.FeatureWrites {
-		err = st.SetWritesFlag(*user, allowed)
 	} else {
 		err = st.SetReconOverride(*user, typ, allowed)
 	}
@@ -210,7 +200,12 @@ func permSet(st *store.Store, action string, args []string) {
 	target := "(global)"
 	if *user != "" {
 		target = *user
-		on, _ := st.ReconAccess(*user, typ)
+		var on bool
+		if boostedFeatures[typ] {
+			on, _ = st.BoostedAccess(*user)
+		} else {
+			on, _ = st.ReconAccess(*user, typ)
+		}
 		fmt.Printf("%s %s for %q (effective=%v)\n", past(action), typ, *user, on)
 		return
 	}

@@ -82,13 +82,10 @@ func (p *Proxy) handleJSONRPCIntern(w http.ResponseWriter, r *http.Request) {
 			if m == "" {
 				m = req.Method
 			}
-			// Absence and write methods are gated per sub-perm.
+			// Write methods are gated per boosted flag; reading your own
+			// absences is always allowed.
 			username := extractAuthUser(body)
-			if username != "" && isAbsenceMethod(m) && !p.hasAbsences(username) {
-				p.writeJSONRPCError(w, req.ID, "method not allowed", -32601)
-				return
-			}
-			if username != "" && isWriteMethod(m) && !p.hasWrites(username) {
+			if username != "" && isWriteMethod(m) && !p.isBoosted(username) {
 				p.writeJSONRPCError(w, req.ID, "method not allowed", -32601)
 				return
 			}
@@ -111,12 +108,9 @@ func (p *Proxy) handleJSONRPCIntern(w http.ResponseWriter, r *http.Request) {
 		if m == "" {
 			m = req.Method
 		}
-		// Absence and write methods are gated per sub-perm.
-		if isAbsenceMethod(m) && !p.hasAbsences(user.Username) {
-			p.writeJSONRPCError(w, req.ID, "method not allowed", -32601)
-			return
-		}
-		if isWriteMethod(m) && !p.hasWrites(user.Username) {
+		// Write methods are gated per boosted flag; reading your own
+		// absences is always allowed.
+		if isWriteMethod(m) && !p.isBoosted(user.Username) {
 			p.writeJSONRPCError(w, req.ID, "method not allowed", -32601)
 			return
 		}
