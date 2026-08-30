@@ -343,13 +343,13 @@ func (p *Proxy) markPooledElementsDisplayable(body []byte, username string) []by
 			}
 		}
 	}
-	setDisplayable("klassen", func(id int64) bool { return pooled[id] }, "displayable")
 	// Teacher accounts (non-students) behave like the stock WebUntis API:
 	// leave their teacher/room/subject displayAllowed flags untouched. For
 	// students, reconstructed elements are only made displayable to users who
-	// hold the recon permission.
+	// hold the recon permission; boosted users see every element.
 	requester, _ := p.store.GetUser(username)
 	isStudent := requester != nil && requester.PersonType == 5
+	boosted := p.isBoosted(username)
 	if !isStudent {
 		out, err := json.Marshal(m)
 		if err != nil {
@@ -357,16 +357,28 @@ func (p *Proxy) markPooledElementsDisplayable(body []byte, username string) []by
 		}
 		return out
 	}
+	if boosted {
+		// Boosted users can serve every class/teacher/room/subject raw via the
+		// saved teacher accounts, so make all of them selectable.
+		setDisplayable("klassen", func(id int64) bool { return true }, "displayable")
+		setDisplayable("teachers", func(id int64) bool { return true }, "displayAllowed")
+		setDisplayable("rooms", func(id int64) bool { return true }, "displayAllowed")
+		setDisplayable("subjects", func(id int64) bool { return true }, "displayAllowed")
+		out, err := json.Marshal(m)
+		if err != nil {
+			return body
+		}
+		return out
+	}
 	can, _ := p.store.ReconAccess(username, "TEACHER")
-	boosted := p.isBoosted(username)
 	setDisplayable("teachers", func(id int64) bool {
-		return boosted || (can && p.recon.has("TEACHER", id))
+		return can && p.recon.has("TEACHER", id)
 	}, "displayAllowed")
 	setDisplayable("rooms", func(id int64) bool {
-		return boosted || (can && p.recon.has("ROOM", id))
+		return can && p.recon.has("ROOM", id)
 	}, "displayAllowed")
 	setDisplayable("subjects", func(id int64) bool {
-		return boosted || (can && p.recon.has("SUBJECT", id))
+		return can && p.recon.has("SUBJECT", id)
 	}, "displayAllowed")
 
 	out, err := json.Marshal(m)
