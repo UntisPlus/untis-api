@@ -98,48 +98,45 @@ go build ./cmd/untisctl
 (The `-db` default is `untis.db`; the binary is also baked into the Docker
 image as `/usr/local/bin/untisctl`.)
 
-### perms — who can reconstruct what, plus god tiers
+### perms — tiers: Basic / Reconstruction / Boosted (+ absences & writes)
 
-Access is **per element type** (`TEACHER` / `ROOM` / `SUBJECT`), each with a
-**global switch** that applies to everyone **plus a per-user override** that
-wins when set. The **class pool is available to everyone by default**.
+Access follows a three-tier model plus two sub-permissions:
 
-**Reconstruction types (level 2/3):**
+| Tier | Flag | Scope | What you get |
+|---|---|---|---|
+| **Basic** | *(none)* | everyone by default | Pool of classes + your own personal student timetable. |
+| **Reconstruction** | `recon` | global switch **or** per-user override | Teacher / room / subject timetables **reconstructed 100% from pooled class data**. |
+| **Boosted** | `boosted` | per-user only | Class/teacher/room/subject timetables **raw-forwarded through any saved teacher account** — no reconstruction. Your own personal (STUDENT) timetable stays on your own account. |
+| Sub-perm: **absences** | `absences` | per-user only | Absence-checking methods (info center). Also implies Boosted raw behavior. |
+| Sub-perm: **writes** | `writes` | per-user only | Lesson/subject write methods (set/add/update/delete/change). Also implies Boosted raw behavior. |
+
+**Boosted XOR Recon**: `boosted`/`absences`/`writes` and `recon` are mutually
+exclusive per user — granting one side auto-revokes the other.
+
 ```sh
 untisctl perms list                              # show global switches + overrides
-untisctl perms grant --global room               # enable ROOM reconstruction for everyone
-untisctl perms grant --user Evadee teacher       # per-user override
-untisctl perms revoke --user Evadee subject
+untisctl perms grant --global recon              # enable recon for everyone
+untisctl perms grant --user Evadee recon         # per-user override
+untisctl perms grant --user Evadee boosted       # per-user boosted (raw forwarding)
+untisctl perms grant --user X absences           # allow absence methods
+untisctl perms grant --user X writes             # allow lesson/subject write methods
 untisctl perms clear --user Evadee               # drop overrides -> fall back to global
-untisctl perms reset                             # wipe all -> class-pool-only for everyone
+untisctl perms reset                             # wipe all -> Basic for everyone
 ```
 
-> Flags come **before** the positional type: `perms grant --user X teacher`
+> Flags come **before** the positional type: `perms grant --user X recon`
 > (Go's `flag` package does not intersperse flags after positionals).
 
+The `boosted`/`absences`/`writes` features are **per-user only** (no `--global`).
+
 In the app, classes are always shown; **teacher/room/subject element types are
-hidden unless the user is granted them** (the masterData `displayAllowed` flags
-are set from the user's effective access). Reconstruction is always 100% rebuilt
-from pooled class data.
-
-**God tiers (level 5/6) — mutually exclusive with reconstruction types:**
-
-| Feature | Meaning |
-|---|---|
-| `god-api` | **Full raw superuser**: everything (teacher/room/class/student timetables, masterData, info-center) served **raw from the pooled teacher accounts** — no reconstruction. Cannot hold `ROOM`/`TEACHER`/`SUBJECT`. Non-student `god-api` holders **donate to the pool**. |
-| `god-api-editor` | Unlocks **absence-checking + lesson/subject write** methods (denied to everyone else, including `god-api` holders). |
-
-```sh
-untisctl perms grant --user X god-api        # level 5: raw superuser
-untisctl perms grant --user X god-api-editor # level 6: allow absences + writes
-```
-
-The god features are **per-user only** (no `--global`). Granting one side
-auto-revokes the other (`ROOM`/`TEACHER`/`SUBJECT` ⇄ `god-api`/`god-api-editor`).
+hidden unless the user has recon or is boosted** (the masterData `displayAllowed`
+flags are set from the user's effective access).
 
 **Donation rules:**
-- Students (person_type=5) **automatically donate** their class to the pool on login.
-- Non-students **do NOT donate** unless they hold `god-api`.
+- Every user **automatically donates their class to the pool** on login (student
+  and non-student alike).
+- The pooled classes feed both reconstruction and the class-timetable lookup.
 
 ### users — accounts and secrets
 

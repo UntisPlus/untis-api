@@ -1,119 +1,87 @@
-# God-Api Feature Plan
+# Tiered Permission Model — Basic / Reconstruction / Boosted
 
-Status: agreed design, not yet implemented. Implement in stages, test bit-by-bit
-with the user after each stage, git-commit each stage cleanly.
+Status: implemented and committed. Decline/stale notes removed.
 
 ## Goal
 
-Introduce a tiered permission model for the untis-proxy backend:
+Tiered permission model for the untis-proxy backend:
 
-1. Normal users get **reconstructed** teacher/room/subject timetables via
-   per-user `ROOM`/`TEACHER`/`SUBJECT` permissions.
-2. Plain teachers / non-students get **100% stock WebUntis passthrough**
-   (logged + credentials saved, donated to nothing).
-3. A `god-api` permission grants a **full raw superuser** view, served raw
-   from the saved teacher accounts — mutually exclusive with levels 2/3.
-4. A `god-api-editor` permission unlocks absence-checking + lesson/subject
-   write methods, denied to everyone else.
+1. **Basic** (default, no flag) — every user gets the pool of classes plus their
+   own personal student timetable. **Everyone** (student and non-student) donates
+   their class to the pool on login.
+2. **Reconstruction** (flag `recon`) — teacher / room / subject timetables
+   reconstructed 100% from pooled class data. Available as a global switch or a
+   per-user override.
+3. **Boosted** (flag `boosted`) — class/teacher/room/subject timetables
+   raw-forwarded through ANY saved teacher account (`BoostedSourceAccounts`).
+   The user's own personal (STUDENT) timetable stays on the user's own account.
+   Info center uses the user's own account, never a teacher account. Per-user only.
+4. Sub-permissions (per-user, default OFF):
+   - `absences` — absence-checking methods (info center).
+   - `writes` — lesson/subject write methods (set/add/update/delete/change).
+   Each sub-perm **also implies Boosted raw timetable behavior**.
 
 ## Permission table
 
-| Feature | Meaning | Level |
+| Feature | Meaning | Global? |
 |---|---|---|
-| `ROOM` | Reconstruction of room timetables | 2 |
-| `TEACHER` | Reconstruction of teacher timetables | 3 |
-| `SUBJECT` | Reconstruction of subject timetables | 3 |
-| `god-api` | Full raw superuser (see below); mutually exclusive with ROOM/TEACHER/SUBJECT | 5 |
-| `god-api-editor` | Unlocks absences + lesson/subject writes (denied to all others) | 6 |
+| `recon` | Teacher/room/subject reconstruction from pooled classes | yes (switch + per-user override) |
+| `boosted` | Raw teacher-account forwarding (except own STUDENT timetable) | no (per-user only) |
+| `absences` | Absence-checking methods; implies boosted | no (per-user only) |
+| `writes` | Lesson/subject write methods; implies boosted | no (per-user only) |
 
-Automatic rules (no perm tier): class pool available to everyone; students
-(person_type=5) donate to the pool automatically, non-students do not.
+Enforced rule: **Boosted XOR Recon** — `boosted`/`absences`/`writes` and `recon`
+are mutually exclusive per user. Granting one side auto-revokes the other.
 
-Enforced rule: granting `god-api` auto-revokes `ROOM`/`TEACHER`/`SUBJECT`, and
-granting any of those auto-revokes `god-api`.
+## Tier behavior
 
-## Level-by-level behavior
+### Basic (default)
+- Personal timetable: own stock Untis data (own account).
+- Class pool: all pooled classes visible, served via the pooled owner account.
+- Teacher/Room/Subject: not visible.
+- Absence-checking: blocked. Lesson/subject writes: blocked.
+- Donate to pool: everyone (class donated at login).
 
-### Level 1 — no perms (default student / new user)
-- Personal timetable: own stock Untis data
-- Class pool: all classes visible
-- Teacher/Room/Subject: not visible (no reconst. access)
-- Info-center/messages: own stock data
-- Absence-checking: blocked
-- Lesson/subject writes: blocked
-- Donate to pool: student yes / non-student no
+### Recon (`recon`)
+- Grants teacher/room/subject reconstruced timetables from pooled class data.
+- Absence/writes: still blocked unless `absences`/`writes` granted.
+- Caveat: only elements present in pooled class data are servable.
 
-### Level 2/3 — ROOM / TEACHER / SUBJECT (reconstruction path)
-- Each granted type toggles visibility, **always served by 100% reconstruction**
-  from pooled class data; never touched by god-api.
-- Absence/writes: blocked
-- Donate to pool: student yes / non-student no
-- Caveat: reconstruction only serves elements present in pooled class data.
+### Boosted (`boosted`, or implied by `absences`/`writes`)
+- Class/teacher/room/subject timetables: ALL served raw, forwarded through the
+  first available saved teacher account.
+- Own personal (STUDENT) timetable: stays on the user's own account.
+- MasterData: full upstream element lists (displayAllowed set for recon/boosted).
+- Absence-checking: requires `absences`. Lesson/subject writes: requires `writes`.
 
-### Level 4 — plain teacher / non-student (no perms)
-- Login logged; credentials saved (becomes a "teacher account lying around")
-- Everything: 100% stock WebUntis passthrough (nothing touched)
-- Personal timetable: own stock data
-- Absence/writes: blocked
-- Donate to pool: no (class_id not written)
-- These saved teacher accounts are the raw source god-api draws from.
+### Absences (`absences`)
+- Absence-checking methods allowed; also implies Boosted raw timetable behavior.
 
-### Level 5 — god-api (full raw superuser)
-- Requirement: user with a replayable secret; cannot hold ROOM/TEACHER/SUBJECT
-- Donate to pool: always (non-student override)
-- Teacher/Room/Class/Student timetables: ALL served raw, aggregated from the
-  saved teacher accounts
-- MasterData: real upstream (full teachers/rooms/classes/subjects)
-- Info-center: raw
-- Absence-checking: blocked (needs god-api-editor)
-- Lesson/subject writes: blocked (needs god-api-editor)
-
-### Level 6 — god-api-editor
-- Absence-checking: allowed
-- Lesson/subject/timetable writes: allowed
-- Without it: absences + all write methods blocked for every role.
+### Writes (`writes`)
+- Lesson/subject/timetable write methods allowed; also implies Boosted raw
+  behavior.
 
 ## Enforcement rules
 
-- Mutual exclusion in the store + CLI.
-- Donation: ClassID written at login only for students (person_type=5) or
-  god-api holders; others stored with ClassID=0.
-- Sensitive block: absence + write methods denied unless god-api-editor; enforced
-  in every forwarding path (JSON-RPC self-auth + session, legacy JSON-RPC, REST).
-- Data source: ROOM/TEACHER/SUBJECT → reconstruction; god-api → raw from saved
+- Mutual exclusion (Boosted XOR Recon) in the store + CLI.
+- Donation: everyone donates their class at login.
+- Sensitive block: absence methods need `absences`; write methods need `writes`;
+  enforced in every forwarding path (JSON-RPC self-auth + session, legacy
+  JSON-RPC passthrough, REST).
+- Data source: recon → reconstruction from pooled data; boosted → raw from saved
   teacher accounts. Non-overlapping.
 
-## Files to change (implementation phases)
+## Files (implementation notes)
 
-- `internal/store/store.go` — mutual exclusion in SetReconOverride/SetReconType,
-  a `GodSourceAccounts()` helper (saved teacher accounts with secrets),
-  donation logic.
-- `internal/proxy/jsonrpc_intern.go` — donation gate at keyLogin; god-mode raw
-  branch in getTimetable2017; sensitive-method denylist in the default path.
-- `internal/proxy/jsonrpc.go`, `internal/proxy/rest.go` — denylist in
-  passthrough/REST; god-mode raw for weekly REST elements.
-- `cmd/untisctl/main.go`, `cmd/perm/main.go` — add god-api, god-api-editor to
-  grantable features + auto-revoke logic + perms list display.
-- `README.md`, `docs/APP-INTEGRATION.md` — document the tiers.
-
-## Implementation notes / decisions flagged
-
-1. Reconstruction source limit: since non-students no longer donate, the
-   reconstruction pool shrinks to students only. If no student accounts are
-   provisioned/pooled, level 2/3 reconstruction has little data. Decide whether
-   some teacher accounts should still be donated to seed reconstruction (as pool
-   data, not for god).
-2. Raw-via-teacher-accounts for god-api: aggregation may hit rate limits if one
-   teacher account serves many concurrent requests; plan session-cache reuse /
-   small rotation.
-
-## Staged implementation order (agreed)
-
-- Stage A: donation rules (students donate, non-students don't unless god-api) +
-       mutual exclusion in store/CLI.
-- Stage B: sensitive-method denylist (absences + writes) for all unless
-       god-api-editor; add god-api-editor to CLI.
-- Stage C: god-api raw serving from saved teacher accounts (JSON-RPC + REST).
-- Stage D: docs + end-to-end verification.
-
-Test bit-by-bit with the user after each stage; commit each stage cleanly.
+- `internal/store/store.go` — `FeatureRecon`/`FeatureBoosted`/`FeatureAbsences`/
+  `FeatureWrites`, `BoostFeatures`, `ReconAccess`/`BoostedAccess`, `setPerm`
+  mutual exclusion, `BoostedSourceAccounts()`, `SetBoostedFlag`/`SetAbsencesFlag`/
+  `SetWritesFlag`.
+- `internal/proxy/jsonrpc_intern.go` — everyone-donates at keyLogin; boosted raw
+  branch (skips STUDENT) in getTimetable2017; absence/write gating in the default
+  and self-auth paths; single-recon displayAllowed.
+- `internal/proxy/jsonrpc.go`, `internal/proxy/rest.go` — absence/write gating in
+  passthrough/REST; boosted raw for weekly REST elements (skips STUDENT).
+- `cmd/untisctl/main.go`, `cmd/perm/main.go` — recon|boosted|absences|writes
+  grantable features + auto-revoke (XOR) + perms list display.
+- `README.md` — documents the tiers.

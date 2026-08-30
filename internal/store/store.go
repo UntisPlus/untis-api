@@ -184,20 +184,25 @@ const globalPermUser = "*"
 
 // Permission feature names.
 const (
-	FeatureReconRoom   = "ROOM"
-	FeatureReconTeach  = "TEACHER"
-	FeatureReconSubj   = "SUBJECT"
-	FeatureGodAPI      = "god-api"
-	FeatureGodEditor   = "god-api-editor"
+	// FeatureRecon grants reconstruction of teacher/room/subject timetables
+	// from the pooled class data.
+	FeatureRecon = "recon"
+	// FeatureBoosted grants raw forwarding of all class/teacher/room/subject
+	// timetables through a saved teacher account (own personal timetable and the
+	// info center still use the user's own account).
+	FeatureBoosted = "boosted"
+	// FeatureAbsences grants access to absence-checking methods (info center).
+	// It also implies Boosted raw timetable behavior.
+	FeatureAbsences = "absences"
+	// FeatureWrites grants access to lesson/subject write methods. It also
+	// implies Boosted raw timetable behavior.
+	FeatureWrites = "writes"
 )
 
-// ReconTypes is the set of reconstruction element types grantable per user
-// (ROOM/TEACHER/SUBJECT). The god features are separate and mutually exclusive
-// with these.
-var ReconTypes = []string{FeatureReconRoom, FeatureReconTeach, FeatureReconSubj}
-
-// GodFeatures is the set of privileged per-user permission features.
-var GodFeatures = []string{FeatureGodAPI, FeatureGodEditor}
+// BoostFeatures are the per-user features that imply Boosted raw timetable
+// access (full teacher-account forwarding). They are mutually exclusive with
+// the reconstruction flag.
+var BoostFeatures = []string{FeatureBoosted, FeatureAbsences, FeatureWrites}
 
 // HasPerm reports whether a user has an explicit per-user permission row set to
 // allowed. Global switches do not count.
@@ -213,54 +218,77 @@ func (s *Store) HasPerm(username, feature string) (bool, error) {
 	return v != 0, nil
 }
 
-// ReconAccess reports whether a user may use a reconstruction element type
-// (one of TEACHER/ROOM/SUBJECT). A per-user override wins if one exists;
-// otherwise the global switch for the type applies; default is deny.
+// ReconAccess reports whether a user may use reconstruction of teacher/room/
+// subject timetables. A per-user override wins if one exists; otherwise the
+// global switch applies; default is deny.
 func (s *Store) ReconAccess(username, elType string) (bool, error) {
+	_ = elType
 	var v int
-	row := s.db.QueryRow(`SELECT allowed FROM perms WHERE username=? AND feature=?`, username, elType)
+	row := s.db.QueryRow(`SELECT allowed FROM perms WHERE username=? AND feature=?`, username, FeatureRecon)
 	if err := row.Scan(&v); err == nil {
 		return v != 0, nil
 	}
-	row = s.db.QueryRow(`SELECT allowed FROM perms WHERE username=? AND feature=?`, globalPermUser, elType)
+	row = s.db.QueryRow(`SELECT allowed FROM perms WHERE username=? AND feature=?`, globalPermUser, FeatureRecon)
 	if err := row.Scan(&v); err == nil {
 		return v != 0, nil
 	}
 	return false, nil
 }
 
-// SetReconType sets the global switch for an element type across all users.
-func (s *Store) SetReconType(elType string, allowed bool) error {
-	return s.setPerm(globalPermUser, elType, allowed)
+// BoostedAccess reports whether a user effectively gets Boosted raw timetable
+// forwarding: they hold the boosted flag, or an absences/writes sub-perm (each
+// of which implies Boosted raw timetable access).
+func (s *Store) BoostedAccess(username string) (bool, error) {
+	for _, f := range BoostFeatures {
+		if ok, err := s.HasPerm(username, f); err == nil && ok {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
-// SetReconOverride grants or revokes a reconstruction element type for a
-// single user, taking precedence over the global switch.
+// SetReconType sets the global switch for reconstruction across all users.
+func (s *Store) SetReconType(elType string, allowed bool) error {
+	_ = elType
+	return s.setPerm(globalPermUser, FeatureRecon, allowed)
+}
+
+// SetReconOverride grants or revokes reconstruction for a single user, taking
+// precedence over the global switch.
 func (s *Store) SetReconOverride(username, elType string, allowed bool) error {
-	return s.setPerm(username, elType, allowed)
+	_ = elType
+	return s.setPerm(username, FeatureRecon, allowed)
+}
+
+// SetBoostedFlag grants or revokes the boosted (raw teacher forwarding) flag.
+func (s *Store) SetBoostedFlag(username string, allowed bool) error {
+	return s.setPerm(username, FeatureBoosted, allowed)
+}
+
+// SetAbsencesFlag grants or revokes the absences sub-perm.
+func (s *Store) SetAbsencesFlag(username string, allowed bool) error {
+	return s.setPerm(username, FeatureAbsences, allowed)
+}
+
+// SetWritesFlag grants or revokes the writes sub-perm.
+func (s *Store) SetWritesFlag(username string, allowed bool) error {
+	return s.setPerm(username, FeatureWrites, allowed)
 }
 
 func (s *Store) setPerm(username, elType string, allowed bool) error {
-	// god-api and god-api-editor are mutually exclusive with the
-	// reconstruction types (and vice versa): granting one side revokes the
-	// other for the same user. The global switch ("*") is not a real user,
-	// so exclusion only applies to per-user overrides.
+	// Reconstruction is mutually exclusive with the Boosted features (boosted,
+	// absences, writes): granting one side revokes the other side for the same
+	// user. The global switch ("*") is not a real user, so exclusion only
+	// applies to per-user overrides.
 	if username != globalPermUser && allowed {
-		if elType == FeatureGodAPI || elType == FeatureGodEditor {
-			for _, t := range ReconTypes {
-				_ = s.setPermFalse(username, t)
+		if elType == FeatureRecon {
+			// Granting reconstruction revokes all boosted features.
+			for _, f := range BoostFeatures {
+				_ = s.setPermFalse(username, f)
 			}
-			_ = s.setPermFalse(username, FeatureGodAPI)
-			_ = s.setPermFalse(username, FeatureGodEditor)
 		} else {
-			for _, t := range ReconTypes {
-				if t == elType {
-					continue
-				}
-				_ = s.setPermFalse(username, t)
-			}
-			_ = s.setPermFalse(username, FeatureGodAPI)
-			_ = s.setPermFalse(username, FeatureGodEditor)
+			// Granting a boosted feature revokes reconstruction.
+			_ = s.setPermFalse(username, FeatureRecon)
 		}
 	}
 	v := 0
@@ -471,10 +499,10 @@ func (s *Store) OwnerForClass(classID int64) (*User, error) {
 		FROM users WHERE class_id=? AND password<>'' ORDER BY last_seen DESC, id DESC LIMIT 1`, classID))
 }
 
-// GodSourceAccounts returns all users with replayable secrets (password <> '')
+// BoostedSourceAccounts returns all users with replayable secrets (password <> '')
 // who are non-students (person_type != 5). These are the "teacher accounts
-// lying around" that a god-api user draws raw data from.
-func (s *Store) GodSourceAccounts() ([]*User, error) {
+// lying around" that a boosted user draws raw data from.
+func (s *Store) BoostedSourceAccounts() ([]*User, error) {
 	rows, err := s.db.Query(`SELECT id,username,password,method,person_id,person_type,class_id,class_name,email,display_name,created_at,last_seen
 		FROM users WHERE password<>'' AND person_type<>5 ORDER BY last_seen DESC`)
 	if err != nil {

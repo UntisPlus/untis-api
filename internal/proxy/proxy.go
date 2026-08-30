@@ -234,28 +234,36 @@ func (p *Proxy) hasPerm(username, feature string) bool {
 	return ok
 }
 
-// isGod reports whether a user holds the god-api permission (a full raw
-// superuser whose account is used as the upstream source).
-func (p *Proxy) isGod(username string) bool {
-	return p.hasPerm(username, store.FeatureGodAPI)
+// isBoosted reports whether a user effectively gets Boosted raw timetable
+// forwarding (holds the boosted flag or an absences/writes sub-perm).
+func (p *Proxy) isBoosted(username string) bool {
+	ok, _ := p.store.BoostedAccess(username)
+	return ok
 }
 
-// isEditor reports whether a user holds the god-api-editor permission
-// (allows absence-checking + lesson/subject write methods).
-func (p *Proxy) isEditor(username string) bool {
-	return p.hasPerm(username, store.FeatureGodEditor)
+// hasAbsences reports whether a user holds the absences sub-perm.
+func (p *Proxy) hasAbsences(username string) bool {
+	return p.hasPerm(username, store.FeatureAbsences)
 }
 
-// isSensitiveMethod reports whether a JSON-RPC method is an absence-checking
-// or write/mutation method that should be blocked unless the user has
-// god-api-editor.
-func isSensitiveMethod(method string) bool {
-	// Absence-checking methods
+// hasWrites reports whether a user holds the writes sub-perm.
+func (p *Proxy) hasWrites(username string) bool {
+	return p.hasPerm(username, store.FeatureWrites)
+}
+
+// isAbsenceMethod reports whether a JSON-RPC method is an absence-checking
+// method (info center), gated by the absences sub-perm.
+func isAbsenceMethod(method string) bool {
 	switch method {
 	case "getStudentAbsences2017", "getPersonAbsence", "getOwnAbsence", "getTimetableWithAbsences":
 		return true
 	}
-	// Write/mutation methods - block by prefix
+	return false
+}
+
+// isWriteMethod reports whether a JSON-RPC method is a lesson/subject write or
+// mutation method, gated by the writes sub-perm.
+func isWriteMethod(method string) bool {
 	for _, prefix := range []string{"set", "add", "update", "delete", "change"} {
 		if strings.HasPrefix(strings.ToLower(method), prefix) {
 			return true
@@ -265,7 +273,7 @@ func isSensitiveMethod(method string) bool {
 }
 
 // isSensitiveRESTPath reports whether a REST path is an absence or write
-// endpoint that should be blocked unless the user has god-api-editor.
+// endpoint (checked with the caller-provided HTTP method).
 func isSensitiveRESTPath(path string) bool {
 	// Absence REST paths
 	if strings.Contains(path, "/absences/") {

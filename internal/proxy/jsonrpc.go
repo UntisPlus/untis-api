@@ -85,9 +85,6 @@ func (p *Proxy) authenticate(w http.ResponseWriter, r *http.Request, school stri
 	}
 
 	donateClassID := info.ClassID
-	if info.PersonType != 5 && !p.isGod(params.User) {
-		donateClassID = 0
-	}
 	user := &store.User{
 		Username:    params.User,
 		Password:    params.Password,
@@ -133,7 +130,11 @@ func (p *Proxy) passthrough(w http.ResponseWriter, r *http.Request, school strin
 		return
 	}
 	method := extractMethod(body)
-	if isSensitiveMethod(method) && !p.isEditor(user.Username) {
+	if isAbsenceMethod(method) && !p.hasAbsences(user.Username) {
+		p.writeJSONRPCError(w, idOf(body), "method not allowed", -32601)
+		return
+	}
+	if isWriteMethod(method) && !p.hasWrites(user.Username) {
 		p.writeJSONRPCError(w, idOf(body), "method not allowed", -32601)
 		return
 	}

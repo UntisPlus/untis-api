@@ -27,7 +27,7 @@ Usage:
 Commands:
   perms list [--user U]              show global switches and per-user overrides
   perms grant|revoke [--user U|--global] TYPE
-                                     grant/revoke teacher|room|subject
+                                     grant/revoke recon|boosted|absences|writes (boosted*/absences/writes are per-user only)
   perms clear --user U               drop a user's overrides (fall back to global)
   perms reset                        wipe all permissions (class-pool-only default)
 
@@ -88,23 +88,21 @@ func fatal(format string, a ...any) {
 // ---------------------------------------------------------------------------
 
 var reconTypes = map[string]string{
-	"teacher":        "TEACHER",
-	"teachers":       "TEACHER",
-	"room":           "ROOM",
-	"rooms":          "ROOM",
-	"subject":        "SUBJECT",
-	"subjects":       "SUBJECT",
-	"god-api":        "god-api",
-	"godapi":         "god-api",
-	"god-api-editor": "god-api-editor",
-	"godeditor":      "god-api-editor",
-	"godapi-editor":  "god-api-editor",
+	"recon":          store.FeatureRecon,
+	"reconstruction": store.FeatureRecon,
+	"boosted":        store.FeatureBoosted,
+	"boost":          store.FeatureBoosted,
+	"absences":       store.FeatureAbsences,
+	"absence":        store.FeatureAbsences,
+	"writes":         store.FeatureWrites,
+	"write":          store.FeatureWrites,
 }
 
-// godFeatures are per-user-only permissions; they cannot be applied globally.
-var godFeatures = map[string]bool{
-	"god-api":       true,
-	"god-api-editor": true,
+// boostedFeatures are per-user-only permissions; they cannot be applied globally.
+var boostedFeatures = map[string]bool{
+	store.FeatureBoosted:  true,
+	store.FeatureAbsences: true,
+	store.FeatureWrites:   true,
 }
 
 func cmdPerms(st *store.Store, args []string) {
@@ -178,11 +176,11 @@ func permSet(st *store.Store, action string, args []string) {
 
 	rest := fs.Args()
 	if len(rest) == 0 {
-		fatal("perms %s requires a TYPE (e.g. 'perms %s --user U teacher')", action, action)
+		fatal("perms %s requires a TYPE (e.g. 'perms %s --user U recon')", action, action)
 	}
 	typ, ok := reconTypes[strings.ToLower(rest[0])]
 	if !ok {
-		fatal("unknown type %q (use teacher|room|subject|god-api|god-api-editor)", rest[0])
+		fatal("unknown type %q (use recon|boosted|absences|writes)", rest[0])
 	}
 	if *user != "" && *global {
 		fatal("pick --user (per-user) or --global (all users), not both")
@@ -190,13 +188,19 @@ func permSet(st *store.Store, action string, args []string) {
 	if *user == "" && !*global {
 		fatal("require --user U or --global")
 	}
-	if *global && godFeatures[typ] {
-		fatal("god features (%s) are per-user only; use --user", typ)
+	if *global && boostedFeatures[typ] {
+		fatal("boosting features (%s) are per-user only; use --user", typ)
 	}
 	allowed := action == "grant"
 	var err error
 	if *global {
 		err = st.SetReconType(typ, allowed)
+	} else if typ == store.FeatureBoosted {
+		err = st.SetBoostedFlag(*user, allowed)
+	} else if typ == store.FeatureAbsences {
+		err = st.SetAbsencesFlag(*user, allowed)
+	} else if typ == store.FeatureWrites {
+		err = st.SetWritesFlag(*user, allowed)
 	} else {
 		err = st.SetReconOverride(*user, typ, allowed)
 	}

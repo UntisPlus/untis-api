@@ -16,41 +16,45 @@ func (p *Proxy) handleREST(w http.ResponseWriter, r *http.Request) {
 		school = s
 	}
 	switch r.URL.Path {
-	case "/WebUntis/api/public/timetable/weekly/data":
-		p.restWeeklyTimetable(w, r, school)
-	default:
-		user := p.sessionUser(r)
-		if user == nil {
-			if tok := r.Header.Get("Authorization"); strings.HasPrefix(tok, "Bearer ") {
-				// BetterUntis self-authenticates REST calls via a Bearer token
-				// (from getAuthToken); forward as-is so the real server serves
-				// only that user's own data.
-				if isSensitiveRESTPath(r.URL.Path) && (r.Method == "POST" || r.Method == "PUT" || r.Method == "DELETE") {
-					p.forbidden(w)
+		default:
+			user := p.sessionUser(r)
+			if user == nil {
+				if tok := r.Header.Get("Authorization"); strings.HasPrefix(tok, "Bearer ") {
+					// BetterUntis self-authenticates REST calls via a Bearer token
+					// (from getAuthToken); forward as-is so the real server serves
+					// only that user's own data.
+					if isSensitiveRESTPath(r.URL.Path) {
+						// Block write verbs and absences on sensitive paths for
+						// Bearer requests (we can't verify per-user sub-perms
+						// here without a session, so default to deny).
+						if r.Method == "POST" || r.Method == "PUT" || r.Method == "DELETE" ||
+							strings.Contains(r.URL.Path, "/absences/") {
+							p.forbidden(w)
+							return
+						}
+					}
+					b, status, err := p.untis.RESTGetToken(school, tok, r.URL.Path, r.URL.RawQuery)
+					if err != nil {
+						p.forbidden(w)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(status)
+					_, _ = w.Write(b)
 					return
 				}
-				b, status, err := p.untis.RESTGetToken(school, tok, r.URL.Path, r.URL.RawQuery)
-				if err != nil {
-					p.forbidden(w)
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(status)
-				_, _ = w.Write(b)
+				p.forbidden(w)
 				return
 			}
-			p.forbidden(w)
-			return
-		}
-		// Session path: check sensitive endpoints with editor permission
+		// Session path: gate absences and write methods per sub-perm.
 		if isSensitiveRESTPath(r.URL.Path) {
 			if r.Method == "POST" || r.Method == "PUT" || r.Method == "DELETE" {
-				if !p.isEditor(user.Username) {
+				if !p.hasWrites(user.Username) {
 					p.forbidden(w)
 					return
 				}
-			} else if strings.Contains(r.URL.Path, "/absences/") && !p.isEditor(user.Username) {
-				// GET absences also blocked without editor
+			} else if strings.Contains(r.URL.Path, "/absences/") && !p.hasAbsences(user.Username) {
+				// GET absences also blocked without absences sub-perm
 				p.forbidden(w)
 				return
 			}
@@ -78,10 +82,15 @@ func (p *Proxy) restWeeklyTimetable(w http.ResponseWriter, r *http.Request, scho
 		return
 	}
 
-	// god-api: serve raw from saved teacher accounts
-	if p.isGod(user.Username) {
-		p.serveRESTRawFromGodSource(w, r, school)
-		return
+	// boost: serve class/teacher/room/subject timetables raw from saved teacher
+	// accounts, but the user's own personal (STUDENT) timetable stays on their
+	// own account.
+	if p.isBoosted(user.Username) {
+		elType := r.URL.Query().Get("elementType")
+		if elType != "5" {
+			p.serveRESTRawFromBoostedSource(w, r, school)
+			return
+		}
 	}
 
 	q := r.URL.Query()
@@ -135,10 +144,10 @@ func (p *Proxy) restWeeklyTimetable(w http.ResponseWriter, r *http.Request, scho
 	}
 }
 
-// serveRESTRawFromGodSource serves the weekly timetable REST endpoint raw
-// from the saved teacher accounts when the requester holds the god-api permission.
-func (p *Proxy) serveRESTRawFromGodSource(w http.ResponseWriter, r *http.Request, school string) {
-	sources, err := p.store.GodSourceAccounts()
+// serveRESTRawFromBoostedSource serves the weekly timetable REST endpoint raw
+// from the saved teacher accounts when the requester is boosted.
+func (p *Proxy) serveRESTRawFromBoostedSource(w http.ResponseWriter, r *http.Request, school string) {
+	sources, err := p.store.BoostedSourceAccounts()
 	if err != nil || len(sources) == 0 {
 		p.forbidden(w)
 		return

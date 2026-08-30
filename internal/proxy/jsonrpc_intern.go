@@ -75,15 +75,20 @@ func (p *Proxy) handleJSONRPCIntern(w http.ResponseWriter, r *http.Request) {
 		// Info-center style methods (absences, events, messages, ...) are
 		// self-authenticating: BetterUntis includes an auth block per request.
 		// Forward as-is so the real server validates the OTP and returns only
-		// that user's own data.
+		// that user's own data (info center always uses the user's own account,
+		// never a teacher account).
 		if hasAuthBlock(body) {
 			m := r.URL.Query().Get("m")
 			if m == "" {
 				m = req.Method
 			}
-			// Check sensitive method denylist for self-auth path
+			// Absence and write methods are gated per sub-perm.
 			username := extractAuthUser(body)
-			if username != "" && isSensitiveMethod(m) && !p.isEditor(username) {
+			if username != "" && isAbsenceMethod(m) && !p.hasAbsences(username) {
+				p.writeJSONRPCError(w, req.ID, "method not allowed", -32601)
+				return
+			}
+			if username != "" && isWriteMethod(m) && !p.hasWrites(username) {
 				p.writeJSONRPCError(w, req.ID, "method not allowed", -32601)
 				return
 			}
@@ -106,8 +111,12 @@ func (p *Proxy) handleJSONRPCIntern(w http.ResponseWriter, r *http.Request) {
 		if m == "" {
 			m = req.Method
 		}
-		// Check sensitive method denylist for session path
-		if isSensitiveMethod(m) && !p.isEditor(user.Username) {
+		// Absence and write methods are gated per sub-perm.
+		if isAbsenceMethod(m) && !p.hasAbsences(user.Username) {
+			p.writeJSONRPCError(w, req.ID, "method not allowed", -32601)
+			return
+		}
+		if isWriteMethod(m) && !p.hasWrites(user.Username) {
 			p.writeJSONRPCError(w, req.ID, "method not allowed", -32601)
 			return
 		}
@@ -244,14 +253,9 @@ func (p *Proxy) keyLogin(w http.ResponseWriter, r *http.Request, school string, 
 			replayKey = existing.Password
 		}
 	}
-	// Donation rule: students donate their class to the pool automatically;
-	// non-students donate only when granted god-api. Everyone is still stored
-	// (for stock passthrough + session), but non-donors have class_id=0 so
-	// Pool()/PoolContains()/OwnerForClass stop counting them.
+	// Donation rule: everyone donates their class to the pool, so Pool()/
+	// PoolContains()/OwnerForClass see the full set of classes users belong to.
 	donateClassID := info.ClassID
-	if info.PersonType != 5 && !p.isGod(auth.User) {
-		donateClassID = 0
-	}
 	user := &store.User{
 		Username:    auth.User,
 		Password:    replayKey,
@@ -346,19 +350,17 @@ func (p *Proxy) markPooledElementsDisplayable(body []byte, username string) []by
 		}
 	}
 	setDisplayable("klassen", func(id int64) bool { return pooled[id] }, "displayable")
-	can := map[string]bool{}
-	for _, t := range []string{"TEACHER", "ROOM", "SUBJECT"} {
-		ok, _ := p.store.ReconAccess(username, t)
-		can[t] = ok
-	}
+	// Reconstruction elements (teachers/rooms/subjects) are only made
+	// displayable to users who hold the recon permission.
+	can, _ := p.store.ReconAccess(username, "TEACHER")
 	setDisplayable("teachers", func(id int64) bool {
-		return can["TEACHER"] && p.recon.has("TEACHER", id)
+		return can && p.recon.has("TEACHER", id)
 	}, "displayAllowed")
 	setDisplayable("rooms", func(id int64) bool {
-		return can["ROOM"] && p.recon.has("ROOM", id)
+		return can && p.recon.has("ROOM", id)
 	}, "displayAllowed")
 	setDisplayable("subjects", func(id int64) bool {
-		return can["SUBJECT"] && p.recon.has("SUBJECT", id)
+		return can && p.recon.has("SUBJECT", id)
 	}, "displayAllowed")
 
 	out, err := json.Marshal(m)
@@ -405,9 +407,11 @@ func (p *Proxy) getTimetable2017(w http.ResponseWriter, r *http.Request, school 
 		return
 	}
 
-	// god-api: serve everything raw from saved teacher accounts
-	if p.isGod(requesterName) {
-		p.serveRawFromGodSource(w, r, school, id, body)
+	// boost: serve all class/teacher/room/subject timetables raw from saved
+	// teacher accounts, but the user's own personal (STUDENT) timetable stays on
+	// their own account.
+	if p.isBoosted(requesterName) && pr.Type != "STUDENT" {
+		p.serveRawFromBoostedSource(w, r, school, id, body)
 		return
 	}
 
@@ -477,17 +481,17 @@ func (p *Proxy) getTimetable2017(w http.ResponseWriter, r *http.Request, school 
 	_, _ = w.Write(b)
 }
 
-// serveRawFromGodSource serves timetable requests (CLASS/STUDENT/TEACHER/ROOM/SUBJECT)
-// raw from the saved teacher accounts when the requester holds the god-api permission.
-// It picks the first available god source account and forwards the request with
-// rewritten auth to that account.
-func (p *Proxy) serveRawFromGodSource(w http.ResponseWriter, r *http.Request, school string, id json.RawMessage, body []byte) {
-	sources, err := p.store.GodSourceAccounts()
+// serveRawFromBoostedSource serves timetable requests (CLASS/STUDENT/TEACHER/
+// ROOM/SUBJECT) raw from the saved teacher accounts when the requester is
+// boosted. It picks the first available teacher source account and forwards the
+// request with rewritten auth to that account.
+func (p *Proxy) serveRawFromBoostedSource(w http.ResponseWriter, r *http.Request, school string, id json.RawMessage, body []byte) {
+	sources, err := p.store.BoostedSourceAccounts()
 	if err != nil || len(sources) == 0 {
-		p.writeJSONRPCError(w, id, "no god source accounts available", -8509)
+		p.writeJSONRPCError(w, id, "no teacher source accounts available", -8509)
 		return
 	}
-	// Use the most recent god source account (first in list)
+	// Use the most recent teacher source account (first in list)
 	owner := sources[0]
 	newBody, err := p.rewriteAuthForOwner(school, body, owner)
 	if err != nil {

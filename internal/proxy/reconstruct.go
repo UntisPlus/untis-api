@@ -354,7 +354,7 @@ func (p *Proxy) elementPeriods(school, elType string, elID int64, start, end str
 	for _, c := range classes {
 		ps, err := p.classPeriods(school, c.ID, start, end)
 		if err != nil {
-			return nil, err
+			continue
 		}
 		for _, pd := range ps {
 			matched := false

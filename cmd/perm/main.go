@@ -4,41 +4,38 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"strings"
 
 	"untis-proxy/internal/store"
 )
 
-// types is the set of reconstruction element types that can be granted, plus
-// the lowercase aliases used on the command line.
+// types are the permission features that can be granted, plus the lowercase
+// aliases used on the command line.
 var typeAliases = map[string]string{
-	"teacher":      "TEACHER",
-	"room":         "ROOM",
-	"subject":      "SUBJECT",
-	"class":        "CLASS",
-	"student":      "STUDENT",
-	"teachers":     "TEACHER",
-	"rooms":        "ROOM",
-	"subjects":     "SUBJECT",
-	"god-api":      "god-api",
-	"godapi":       "god-api",
-	"god-api-editor": "god-api-editor",
-	"godeditor":    "god-api-editor",
-	"godapi-editor": "god-api-editor",
+	"recon":         store.FeatureRecon,
+	"reconstruction": store.FeatureRecon,
+	"boosted":       store.FeatureBoosted,
+	"boost":         store.FeatureBoosted,
+	"absences":      store.FeatureAbsences,
+	"absence":       store.FeatureAbsences,
+	"writes":        store.FeatureWrites,
+	"write":         store.FeatureWrites,
 }
 
-// godFeatures are per-user-only and cannot be applied via the global switch.
-var godFeatures = map[string]bool{
-	"god-api":       true,
-	"god-api-editor": true,
+// boostedFeatures are per-user-only and cannot be applied via the global switch.
+var boostedFeatures = map[string]bool{
+	store.FeatureBoosted:  true,
+	store.FeatureAbsences: true,
+	store.FeatureWrites:   true,
 }
 
 func main() {
 	db := flag.String("db", "untis.db", "sqlite database path")
 	username := flag.String("user", "", "username to grant/override access for (omit with -global)")
 	global := flag.Bool("global", false, "operate on the global switch that applies to all users")
-	elType := flag.String("type", "all", "element type: teacher|room|subject|god-api|god-api-editor|all (case-insensitive)")
-	grant := flag.Bool("grant", false, "grant the type")
-	revoke := flag.Bool("revoke", false, "revoke the type")
+	elType := flag.String("type", "all", "permission: recon|boosted|absences|writes|all (case-insensitive)")
+	grant := flag.Bool("grant", false, "grant the permission")
+	revoke := flag.Bool("revoke", false, "revoke the permission")
 	clear := flag.Bool("clear", false, "clear all per-user overrides for -user (fall back to global)")
 	all := flag.Bool("all", false, "apply to every user (revoke/clear only)")
 	flag.Parse()
@@ -89,8 +86,12 @@ func main() {
 	if *grant == *revoke {
 		log.Fatal("exactly one of --grant or --revoke is required")
 	}
-	if *global && godFeatures[*elType] {
-		log.Fatal("god features (god-api, god-api-editor) are per-user only; use --user")
+	if *global {
+		for _, t := range types {
+			if boostedFeatures[t] {
+				log.Fatalf("boosting features (%s) are per-user only; use --user", t)
+			}
+		}
 	}
 
 	allowed := *grant
@@ -98,25 +99,40 @@ func main() {
 		var err error
 		if *global {
 			err = st.SetReconType(t, allowed)
+		} else if t == store.FeatureBoosted {
+			err = st.SetBoostedFlag(*username, allowed)
+		} else if t == store.FeatureAbsences {
+			err = st.SetAbsencesFlag(*username, allowed)
+		} else if t == store.FeatureWrites {
+			err = st.SetWritesFlag(*username, allowed)
 		} else {
 			err = st.SetReconOverride(*username, t, allowed)
 		}
 		if err != nil {
 			log.Fatalf("set %s: %v", t, err)
 		}
-		on, _ := st.ReconAccess(*username, t)
-		fmt.Printf("%s reconstruction %s (effective for %q = %v)\n", t, verb(allowed), *username, on)
+		if *username != "" {
+			var on bool
+			if boostedFeatures[t] {
+				on, _ = st.BoostedAccess(*username)
+			} else {
+				on, _ = st.ReconAccess(*username, t)
+			}
+			fmt.Printf("%s %s (effective for %q = %v)\n", t, verb(allowed), *username, on)
+		} else {
+			fmt.Printf("%s %s globally\n", t, verb(allowed))
+		}
 	}
 }
 
 func resolveTypes(s string) []string {
 	if s == "all" {
-		return []string{"TEACHER", "ROOM", "SUBJECT"}
+		return []string{store.FeatureRecon}
 	}
-	if t, ok := typeAliases[s]; ok {
+	if t, ok := typeAliases[strings.ToLower(s)]; ok {
 		return []string{t}
 	}
-	log.Fatalf("unknown type %q (use teacher|room|subject|god-api|god-api-editor|all)", s)
+	log.Fatalf("unknown permission %q (use recon|boosted|absences|writes|all)", s)
 	return nil
 }
 
