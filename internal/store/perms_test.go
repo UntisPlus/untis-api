@@ -219,3 +219,48 @@ func TestUsernameCaseInsensitiveWrites(t *testing.T) {
 		t.Fatal("upsert+lookup must hit the same account regardless of case")
 	}
 }
+
+func TestUsernameCaseSelfHealOnWrite(t *testing.T) {
+	path := t.TempDir() + "/t.db"
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A capital-cased account exists (as if seeded before normalization) with a
+	// permission flag stored under the same capital casing.
+	if _, err := st.db.Exec(`INSERT INTO users (username,password,method,last_seen) VALUES (?,?,?,?)`,
+		"Evadee", "pw", "key", 1000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`INSERT INTO perms (username, feature, allowed) VALUES (?,?,?)`,
+		"Evadee", FeatureBoosted, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	// The app now logs in with the lowercase casing: this must collapse the
+	// variants at write time (not wait for a restart) and keep the flag.
+	u := &User{Username: "evadee", Password: "pw", Method: "key", PersonType: 5, ClassID: 4419}
+	if err := st.UpsertUser(u); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := st.GetUser("Evadee")
+	if err != nil || got == nil {
+		t.Fatalf("GetUser err=%v user=%v", err, got)
+	}
+	got2, _ := st.GetUser("evadee")
+	if got2 == nil || got2.ID != got.ID {
+		t.Fatal("case variants must collapse to one account")
+	}
+	if in, _ := st.BoostedAccess("evadee"); !in {
+		t.Fatal("flag must survive the write-time merge")
+	}
+	var n int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("expected a single merged row, got %d", n)
+	}
+}

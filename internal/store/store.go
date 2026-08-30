@@ -159,31 +159,42 @@ func Open(path string) (*Store, error) {
 // recently active variant wins for profile data; secrets and permission flags
 // are merged across all variants.
 func (s *Store) normalizeUsernames() error {
-	rows, err := s.db.Query(`SELECT username FROM users ORDER BY last_seen DESC, id DESC`)
+	rows, err := s.db.Query(`SELECT id,username,password,method,person_id,person_type,class_id,class_name,email,display_name,created_at,last_seen
+		FROM users ORDER BY last_seen DESC, id DESC`)
 	if err != nil {
 		return err
 	}
-	type dup struct{ name string }
-	var dups []string
-	canonical := map[string]string{}
+	groups := map[string][]*User{}
+	var order []string
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		var u User
+		var ca, ls int64
+		if err := rows.Scan(&u.ID, &u.Username, &u.Password, &u.Method, &u.PersonID, &u.PersonType,
+			&u.ClassID, &u.ClassName, &u.Email, &u.DisplayName, &ca, &ls); err != nil {
 			rows.Close()
 			return err
 		}
-		key := norm(name)
-		if _, ok := canonical[key]; !ok {
-			canonical[key] = name
-		} else {
-			dups = append(dups, name)
+		u.CreatedAt, u.LastSeen = time.Unix(ca, 0), time.Unix(ls, 0)
+		key := norm(u.Username)
+		if _, ok := groups[key]; !ok {
+			order = append(order, key)
 		}
+		groups[key] = append(groups[key], &u)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if len(dups) == 0 {
+
+	need := false
+	for _, key := range order {
+		g := groups[key]
+		if len(g) > 1 || g[0].Username != key {
+			need = true
+			break
+		}
+	}
+	if !need {
 		return nil
 	}
 
@@ -191,68 +202,69 @@ func (s *Store) normalizeUsernames() error {
 	if err != nil {
 		return err
 	}
-	for _, name := range dups {
-		key := norm(name)
-		can := canonical[key]
-		if can == name {
+	merged := 0
+	for _, key := range order {
+		g := groups[key]
+		if len(g) == 1 && g[0].Username == key {
 			continue
 		}
-		// Canonicalize the surviving account's username to lowercase so future
-		// lookups (also normalized) hit it regardless of input case.
-		low := norm(name)
-		// Merge secret: keep the newest non-empty secret among the variants.
-		var sec string
-		var t time.Time
-		if err := s.loadSecretRow(tx, can, &sec, &t); err != nil {
-			tx.Rollback()
-			return err
-		}
-		var sec2 string
-		var t2 time.Time
-		if err := s.loadSecretRow(tx, name, &sec2, &t2); err != nil {
-			tx.Rollback()
-			return err
-		}
-		if sec2 != "" && (sec == "" || t2.After(t)) {
-			sec, t = sec2, t2
-		}
-		secretRow := sec
+		// The first member is the most recently active (ORDER BY last_seen).
+		best := g[0]
 
-		// Merge perms: OR both sides; if a conflict somehow pits boosted vs
-		// recon (should not happen — XOR is enforced per user), boosted wins.
+		// Merge secrets (newest non-empty wins) and perms (OR; boosted beats
+		// recon in the impossible conflict case) across every variant.
+		var sec string
+		var secAt int64
 		perms := map[string]bool{}
-		if err := s.loadPerms(tx, can, perms); err != nil {
-			tx.Rollback()
-			return err
-		}
-		dupPerms := map[string]bool{}
-		if err := s.loadPerms(tx, name, dupPerms); err != nil {
-			tx.Rollback()
-			return err
-		}
-		for f, v := range dupPerms {
-			perms[f] = perms[f] || v
+		for _, m := range g {
+			var msec string
+			var mat int64
+			if err := s.loadSecretRow(tx, m.Username, &msec, &mat); err != nil {
+				tx.Rollback()
+				return err
+			}
+			if msec != "" && (sec == "" || mat >= secAt) {
+				sec, secAt = msec, mat
+			}
+			if err := s.loadPerms(tx, m.Username, perms); err != nil {
+				tx.Rollback()
+				return err
+			}
 		}
 		if perms[FeatureRecon] && perms[FeatureBoosted] {
 			perms[FeatureRecon] = false
 		}
 
-		// Collapse the variant account into the canonical one.
-		if _, err := tx.Exec(`DELETE FROM users WHERE username=?`, name); err != nil {
+		// Drop every variant row (user + its secret + its per-user perms).
+		for _, m := range g {
+			if _, err := tx.Exec(`DELETE FROM users WHERE username=?`, m.Username); err != nil {
+				tx.Rollback()
+				return err
+			}
+			if _, err := tx.Exec(`DELETE FROM secrets WHERE username=?`, m.Username); err != nil {
+				tx.Rollback()
+				return err
+			}
+			if _, err := tx.Exec(`DELETE FROM perms WHERE username=? AND username<>?`, m.Username, globalPermUser); err != nil {
+				tx.Rollback()
+				return err
+			}
+		}
+
+		// Reinsert one canonical lowercase account with the best profile data.
+		best.Username = key
+		if _, err := tx.Exec(`INSERT INTO users
+			(username, password, method, person_id, person_type, class_id, class_name, email, display_name, created_at, last_seen)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+			best.Username, best.Password, best.Method, best.PersonID, best.PersonType,
+			best.ClassID, best.ClassName, best.Email, best.DisplayName,
+			best.CreatedAt.Unix(), best.LastSeen.Unix()); err != nil {
 			tx.Rollback()
 			return err
 		}
-		if _, err := tx.Exec(`DELETE FROM secrets WHERE username=?`, name); err != nil {
-			tx.Rollback()
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM perms WHERE username=? AND username<>?`, name, globalPermUser); err != nil {
-			tx.Rollback()
-			return err
-		}
-		if secretRow != "" {
-			if _, err := tx.Exec(`INSERT OR REPLACE INTO secrets (username, secret, updated_at) VALUES (?,?,?)`,
-				low, secretRow, t.Unix()); err != nil {
+		if sec != "" {
+			if _, err := tx.Exec(`INSERT INTO secrets (username, secret, updated_at) VALUES (?,?,?)`,
+				key, sec, secAt); err != nil {
 				tx.Rollback()
 				return err
 			}
@@ -262,38 +274,49 @@ func (s *Store) normalizeUsernames() error {
 			if v {
 				allow = 1
 			}
-			if _, err := tx.Exec(`INSERT OR REPLACE INTO perms (username, feature, allowed) VALUES (?,?,?)`,
-				low, f, allow); err != nil {
+			if _, err := tx.Exec(`INSERT INTO perms (username, feature, allowed) VALUES (?,?,?)`,
+				key, f, allow); err != nil {
 				tx.Rollback()
 				return err
 			}
 		}
-		if _, err := tx.Exec(`UPDATE users SET username=? WHERE username=?`, low, can); err != nil {
-			tx.Rollback()
-			return err
-		}
-		canonical[key] = low
+		merged += len(g)
 	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	log.Printf("merged %d case-insensitive duplicate account(s)", len(dups))
+	log.Printf("merged %d case-insensitive duplicate account(s)", merged)
 	return nil
 }
 
-func (s *Store) loadSecretRow(tx *sql.Tx, username string, sec *string, t *time.Time) error {
-	var at int64
+// hasCaseVariant reports whether any users row's normalized username equals
+// username while its stored casing differs (i.e. a case-variant already exists).
+func (s *Store) hasCaseVariant(username string) bool {
+	rows, err := s.db.Query(`SELECT username FROM users`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false
+		}
+		if norm(name) == username {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Store) loadSecretRow(tx *sql.Tx, username string, sec *string, at *int64) error {
 	*sec = ""
-	*t = time.Time{}
-	err := tx.QueryRow(`SELECT secret, updated_at FROM secrets WHERE username=?`, username).Scan(sec, &at)
+	*at = 0
+	err := tx.QueryRow(`SELECT secret, updated_at FROM secrets WHERE username=?`, username).Scan(sec, at)
 	if err == sql.ErrNoRows {
 		return nil
 	}
-	if err != nil {
-		return err
-	}
-	*t = time.Unix(at, 0)
-	return nil
+	return err
 }
 
 func (s *Store) loadPerms(tx *sql.Tx, username string, out map[string]bool) error {
@@ -583,7 +606,18 @@ func (s *Store) UpsertUser(u *User) error {
 		u.CreatedAt = now
 	}
 	u.Username = norm(u.Username)
-	_, err := s.db.Exec(`INSERT INTO users
+	// If the canonical lowercase row does not exist yet but a differently-cased
+	// variant does (e.g. a login right after a capital-cased account was seeded),
+	// collapse the variants first so the upsert below re-targets the merged row
+	// instead of creating yet another case-duplicate.
+	var existing string
+	err := s.db.QueryRow(`SELECT username FROM users WHERE username=?`, u.Username).Scan(&existing)
+	if err == sql.ErrNoRows && s.hasCaseVariant(u.Username) {
+		if err := s.normalizeUsernames(); err != nil {
+			return err
+		}
+	}
+	_, err = s.db.Exec(`INSERT INTO users
 		(username, password, method, person_id, person_type, class_id, class_name, email, display_name, created_at, last_seen)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(username) DO UPDATE SET
