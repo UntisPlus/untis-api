@@ -86,6 +86,26 @@ func (p *Proxy) restWeeklyTimetable(w http.ResponseWriter, r *http.Request, scho
 		}
 	}
 
+	// Teacher accounts (non-students) without the boosted flag behave like the
+	// stock WebUntis API: every weekly element is forwarded raw through their
+	// own session, never intercepted by the pool or the recon gate.
+	if user.PersonType != 5 {
+		cookie, err := p.untis.Session(school, user.Username, user.Password, user.Method)
+		if err != nil {
+			p.forbidden(w)
+			return
+		}
+		b, status, err := p.untis.RESTGet(school, cookie, r.URL.Path, r.URL.RawQuery)
+		if err != nil {
+			p.forbidden(w)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write(b)
+		return
+	}
+
 	q := r.URL.Query()
 	elType := q.Get("elementType")
 	elID, _ := strconv.ParseInt(q.Get("elementId"), 10, 64)

@@ -420,6 +420,27 @@ func (p *Proxy) getTimetable2017(w http.ResponseWriter, r *http.Request, school 
 		return
 	}
 
+	// Teacher accounts (non-students) without the boosted flag behave exactly
+	// like the stock WebUntis API: every timetable request (class, teacher,
+	// room, subject, student) is forwarded raw through their own session, never
+	// intercepted by the pool or the recon gate.
+	if requester.PersonType != 5 {
+		cookie, err := p.untis.Session(school, requester.Username, requester.Password, requester.Method)
+		if err != nil {
+			p.writeJSONRPCError(w, id, "no right for timetable", -8509)
+			return
+		}
+		b, status, _, err := p.untis.RawIntern(school, cookie, "getTimetable2017", body)
+		if err != nil {
+			p.writeJSONRPCError(w, id, "no right for timetable", -8509)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write(b)
+		return
+	}
+
 	classID := int64(0)
 	switch pr.Type {
 	case "STUDENT":
