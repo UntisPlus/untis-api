@@ -371,6 +371,8 @@ func (p *Proxy) markPooledElementsDisplayable(body []byte, username string) []by
 		return out
 	}
 	can, _ := p.store.ReconAccess(username, "TEACHER")
+	// Everyone (Basic and Recon alike) can at least see the pooled classes.
+	setDisplayable("klassen", func(id int64) bool { return pooled[id] }, "displayable")
 	setDisplayable("teachers", func(id int64) bool {
 		return can && p.recon.has("TEACHER", id)
 	}, "displayAllowed")
