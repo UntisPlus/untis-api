@@ -75,13 +75,12 @@ func (p *Proxy) restWeeklyTimetable(w http.ResponseWriter, r *http.Request, scho
 		return
 	}
 
-	// boost: serve class/teacher/room/subject timetables raw from saved teacher
-	// accounts, but the user's own personal (STUDENT) timetable stays on their
-	// own account.
+	// boost: serve ALL weekly elements (class/teacher/room/subject AND the user's
+	// own personal student timetable, elementType 5) raw from the saved teacher
+	// accounts so boosted users get teacher-grade future horizon. If no teacher
+	// account is saved, fall back to the pool/recon handling below.
 	if p.isBoosted(user.Username) {
-		elType := r.URL.Query().Get("elementType")
-		if elType != "5" {
-			p.serveRESTRawFromBoostedSource(w, r, school)
+		if p.serveRESTRawFromBoostedSource(w, r, school) {
 			return
 		}
 	}
@@ -159,26 +158,26 @@ func (p *Proxy) restWeeklyTimetable(w http.ResponseWriter, r *http.Request, scho
 
 // serveRESTRawFromBoostedSource serves the weekly timetable REST endpoint raw
 // from the saved teacher accounts when the requester is boosted.
-func (p *Proxy) serveRESTRawFromBoostedSource(w http.ResponseWriter, r *http.Request, school string) {
+func (p *Proxy) serveRESTRawFromBoostedSource(w http.ResponseWriter, r *http.Request, school string) bool {
 	sources, err := p.store.BoostedSourceAccounts()
 	if err != nil || len(sources) == 0 {
-		p.forbidden(w)
-		return
+		return false
 	}
 	owner := sources[0]
 	cookie, err := p.untis.Session(school, owner.Username, owner.Password, owner.Method)
 	if err != nil {
 		p.forbidden(w)
-		return
+		return true
 	}
 	b, status, err := p.untis.RESTGet(school, cookie, r.URL.Path, r.URL.RawQuery)
 	if err != nil {
 		p.forbidden(w)
-		return
+		return true
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(b)
+	return true
 }
 
 func (p *Proxy) restPoolOwner(school string, classID int64) (*store.User, error) {

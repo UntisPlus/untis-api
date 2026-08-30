@@ -14,9 +14,9 @@ Tiered permission model for the untis-proxy backend:
    reconstructed 100% from pooled class data. Available as a global switch or a
    per-user override.
 3. **Boosted** (flag `boosted`) — class/teacher/room/subject timetables
-   raw-forwarded through ANY saved teacher account (`BoostedSourceAccounts`).
-   The user's own personal (STUDENT) timetable stays on the user's own account.
-   Info center uses the user's own account, never a teacher account. Per-user
+   raw-forwarded through ANY saved teacher account (`BoostedSourceAccounts`),
+   INCLUDING the user's own personal (STUDENT) timetable — teacher-grade future
+   horizon. Info center uses the user's own account, never a teacher account. Per-user
    only. Also **unlocks absence + lesson/subject write (editing) methods**.
 
 ## Permission table
@@ -46,7 +46,10 @@ Granting one side auto-revokes the other.
 ### Boosted (`boosted`)
 - Class/teacher/room/subject timetables: ALL served raw, forwarded through the
   first available saved teacher account.
-- Own personal (STUDENT) timetable: stays on the user's own account.
+- Own personal (STUDENT) timetable: served the same way (through the teacher
+  account), giving it teacher-grade future horizon instead of the student
+  account's ~1-week limit. If nobody has saved a teacher account yet, boosted
+  falls back to Basic for the personal timetable and errors on other elements.
 - MasterData: full upstream element lists (displayAllowed set for recon/boosted).
 - Absence/write **editing methods** (`set`/`add`/`update`/`delete`/`change`):
   allowed. Absence reads are already default-allowed for everyone.

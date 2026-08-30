@@ -106,7 +106,7 @@ Access follows a two-flag tier model:
 |---|---|---|---|
 | **Basic** | *(none)* | everyone by default | Pool of classes + your own personal student timetable + **reading your own absences**. |
 | **Reconstruction** | `recon` | global switch **or** per-user override | Teacher / room / subject timetables **reconstructed 100% from pooled class data**. |
-| **Boosted** | `boosted` | per-user only | Class/teacher/room/subject timetables **raw-forwarded through any saved teacher account** — no reconstruction. Your own personal (STUDENT) timetable stays on your own account. Also **unlocks absence + lesson/subject write (editing) methods**. |
+| **Boosted** | `boosted` | per-user only | Class/teacher/room/subject timetables **raw-forwarded through any saved teacher account** — no reconstruction. Your own personal (STUDENT) timetable is served the same way, giving it teacher-grade visibility (e.g. unlimited future weeks). Also **unlocks absence + lesson/subject write (editing) methods**. If no teacher account is saved, boosted falls back to Basic. |
 
 **Boosted XOR Recon**: the flags are mutually exclusive per user — granting one
 auto-revokes the other.

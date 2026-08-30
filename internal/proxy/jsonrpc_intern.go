@@ -425,12 +425,15 @@ func (p *Proxy) getTimetable2017(w http.ResponseWriter, r *http.Request, school 
 		return
 	}
 
-	// boost: serve all class/teacher/room/subject timetables raw from saved
-	// teacher accounts, but the user's own personal (STUDENT) timetable stays on
-	// their own account.
-	if p.isBoosted(requesterName) && pr.Type != "STUDENT" {
-		p.serveRawFromBoostedSource(w, r, school, id, body)
-		return
+	// boost: serve ALL timetables (class/teacher/room/subject AND the user's own
+	// personal student timetable) raw from the saved teacher accounts. This gives
+	// boosted users teacher-grade visibility — e.g. unlimited future weeks on
+	// their own timetable, which a student account caps at ~1 week. If no
+	// teacher account is saved, fall back to the pool path below.
+	if p.isBoosted(requesterName) {
+		if p.serveRawFromBoostedSource(w, r, school, id, body) {
+			return
+		}
 	}
 
 	// Teacher accounts (non-students) without the boosted flag behave exactly
@@ -524,27 +527,35 @@ func (p *Proxy) getTimetable2017(w http.ResponseWriter, r *http.Request, school 
 // ROOM/SUBJECT) raw from the saved teacher accounts when the requester is
 // boosted. It picks the first available teacher source account and forwards the
 // request with rewritten auth to that account.
-func (p *Proxy) serveRawFromBoostedSource(w http.ResponseWriter, r *http.Request, school string, id json.RawMessage, body []byte) {
-	sources, err := p.store.BoostedSourceAccounts()
-	if err != nil || len(sources) == 0 {
-		p.writeJSONRPCError(w, id, "no teacher source accounts available", -8509)
-		return
+func (p *Proxy) serveRawFromBoostedSource(w http.ResponseWriter, r *http.Request, school string, id json.RawMessage, body []byte) bool {
+	owner := p.boostedSource()
+	if owner == nil {
+		return false
 	}
-	// Use the most recent teacher source account (first in list)
-	owner := sources[0]
 	newBody, err := p.rewriteAuthForOwner(school, body, owner)
 	if err != nil {
 		p.writeJSONRPCError(w, id, "no right for timetable", -8509)
-		return
+		return true
 	}
 	b, status, _, err := p.untis.RawIntern(school, "", "getTimetable2017", newBody)
 	if err != nil {
 		p.writeJSONRPCError(w, id, "no right for timetable", -8509)
-		return
+		return true
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(b)
+	return true
+}
+
+// boostedSource returns the most recently active saved teacher account
+// (non-student with a replayable credential), or nil if none is available.
+func (p *Proxy) boostedSource() *store.User {
+	sources, err := p.store.BoostedSourceAccounts()
+	if err != nil || len(sources) == 0 {
+		return nil
+	}
+	return sources[0]
 }
 
 // serveElementTimetable answers a TEACHER/ROOM/SUBJECT getTimetable2017 request
