@@ -156,6 +156,7 @@ func (p *Proxy) Handler() http.Handler {
 	mux.HandleFunc("/WebUntis/jsonrpc_intern.do", p.handleJSONRPCIntern)
 	mux.HandleFunc("/WebUntis/api/", p.handleREST)
 	mux.HandleFunc("/status", p.handleStatus)
+	mux.HandleFunc("/me", p.handleMe)
 	mux.HandleFunc("POST /api/calendar/token", p.handleCalendarToken)
 	mux.HandleFunc("GET /api/calendar/{token}", p.handleCalendarICS)
 	mux.HandleFunc("GET /api/timetable/changes", p.handleTimetableChanges)
@@ -235,14 +236,21 @@ func (p *Proxy) hasPerm(username, feature string) bool {
 }
 
 // isBoosted reports whether a user effectively gets Boosted raw timetable
-// forwarding and absence/write editing (holds the boosted flag).
+// forwarding (holds the boosted flag).
 func (p *Proxy) isBoosted(username string) bool {
 	ok, _ := p.store.BoostedAccess(username)
 	return ok
 }
 
+// isEditor reports whether a user holds the editor flag (absence/lesson/subject
+// write methods).
+func (p *Proxy) isEditor(username string) bool {
+	ok, _ := p.store.EditorAccess(username)
+	return ok
+}
+
 // isWriteMethod reports whether a JSON-RPC method is a lesson/subject/absence
-// write (mutation) method, gated by the boosted flag. Reading your own absences
+// write (mutation) method, gated by the editor flag. Reading your own absences
 // is always allowed.
 func isWriteMethod(method string) bool {
 	for _, prefix := range []string{"set", "add", "update", "delete", "change"} {

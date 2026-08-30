@@ -1,4 +1,4 @@
-# Tiered Permission Model — Basic / Reconstruction / Boosted
+# Tiered Permission Model — Basic / Reconstruction / Boosted / Editor
 
 Status: implemented and committed. Decline/stale notes removed.
 
@@ -17,17 +17,21 @@ Tiered permission model for the untis-proxy backend:
    raw-forwarded through ANY saved teacher account (`BoostedSourceAccounts`),
    INCLUDING the user's own personal (STUDENT) timetable — teacher-grade future
    horizon. Info center uses the user's own account, never a teacher account. Per-user
-   only. Also **unlocks absence + lesson/subject write (editing) methods**.
+   only. No editing powers on its own.
+4. **Editor** (flag `editor`) — unlocks absence + lesson/subject write (editing)
+   methods. Independent per-user flag.
 
 ## Permission table
 
 | Feature | Meaning | Global? |
 |---|---|---|
 | `recon` | Teacher/room/subject reconstruction from pooled classes | yes (switch + per-user override) |
-| `boosted` | Raw teacher-account forwarding + absence/write editing | no (per-user only) |
+| `boosted` | Raw teacher-account forwarding (no editing) | no (per-user only) |
+| `editor` | Absence + lesson/subject write (editing) methods | no (per-user only) |
 
 Enforced rule: **Boosted XOR Recon** — the flags are mutually exclusive per user.
-Granting one side auto-revokes the other.
+Granting one side auto-revokes the other. `editor` is independent and never
+triggers the exclusion.
 
 ## Tier behavior
 
@@ -40,7 +44,7 @@ Granting one side auto-revokes the other.
 
 ### Recon (`recon`)
 - Grants teacher/room/subject reconstruced timetables from pooled class data.
-- Absence reads: still allowed (default). Writes: still blocked unless boosted.
+- Absence reads: still allowed (default). Writes: still blocked unless editor.
 - Caveat: only elements present in pooled class data are servable.
 
 ### Boosted (`boosted`)
@@ -51,14 +55,21 @@ Granting one side auto-revokes the other.
   account's ~1-week limit. If nobody has saved a teacher account yet, boosted
   falls back to Basic for the personal timetable and errors on other elements.
 - MasterData: full upstream element lists (displayAllowed set for recon/boosted).
-- Absence/write **editing methods** (`set`/`add`/`update`/`delete`/`change`):
-  allowed. Absence reads are already default-allowed for everyone.
+- **No** editing powers: write methods still blocked unless the user also holds
+  `editor`.
+
+### Editor (`editor`)
+- Grants the absence + lesson/subject **write (editing) methods**
+  (`set`/`add`/`update`/`delete`/`change`) for the user's own requests.
+- Does **not** grant raw forward-timetable access on its own — pair with
+  `boosted` for the full experience.
+- Absence reads are already default-allowed for everyone.
 
 ## Enforcement rules
 
-- Mutual exclusion (Boosted XOR Recon) in the store + CLI.
+- Mutual exclusion (Boosted XOR Recon) in the store + CLI; `editor` unaffected.
 - Donation: everyone donates their class at login.
-- Write gate: mutation methods need `boosted`; enforced in every forwarding path
+- Write gate: mutation methods need `editor`; enforced in every forwarding path
   (JSON-RPC self-auth + session, legacy JSON-RPC passthrough, REST). Absence
   reads pass through for all users.
 - Data source: recon → reconstruction from pooled data; boosted → raw from saved
@@ -66,15 +77,16 @@ Granting one side auto-revokes the other.
 
 ## Files (implementation notes)
 
-- `internal/store/store.go` — `FeatureRecon`/`FeatureBoosted`, `BoostFeatures`,
-  `ReconAccess`/`BoostedAccess`, `setPerm` mutual exclusion,
-  `BoostedSourceAccounts()`, `SetBoostedFlag`.
+- `internal/store/store.go` — `FeatureRecon`/`FeatureBoosted`/`FeatureEditor`,
+  `BoostFeatures`, `ReconAccess`/`BoostedAccess`/`EditorAccess`, `setPerm`
+  mutual exclusion (recon↔boosted only), `BoostedSourceAccounts()`,
+  `SetPerm`/`SetBoostedFlag`.
 - `internal/proxy/jsonrpc_intern.go` — everyone-donates at keyLogin; boosted raw
-  branch (skips STUDENT) in getTimetable2017; write gating in the default and
-  self-auth paths; single-recon displayAllowed.
-- `internal/proxy/jsonrpc.go`, `internal/proxy/rest.go` — write gating in
-  passthrough/REST (absence reads default-allowed); boosted raw for weekly REST
-  elements (skips STUDENT).
-- `cmd/untisctl/main.go`, `cmd/perm/main.go` — recon|boosted grantable features
-  + auto-revoke (XOR) + perms list display.
+  branch (skips STUDENT) in getTimetable2017; write gating (editor) in the
+  default and self-auth paths; single-recon displayAllowed.
+- `internal/proxy/jsonrpc.go`, `internal/proxy/rest.go` — write gating (editor)
+  in passthrough/REST (absence reads default-allowed); boosted raw for weekly
+  REST elements (skips STUDENT).
+- `cmd/untisctl/main.go`, `cmd/perm/main.go` — recon|boosted|editor grantable
+  features + auto-revoke (XOR) + perms list display.
 - `README.md` — documents the tiers.

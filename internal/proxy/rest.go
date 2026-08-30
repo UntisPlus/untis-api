@@ -44,10 +44,10 @@ func (p *Proxy) handleREST(w http.ResponseWriter, r *http.Request) {
 			p.forbidden(w)
 			return
 		}
-		// Session path: write verbs are gated by the boosted flag. Reading
+		// Session path: write verbs are gated by the editor flag. Reading
 		// your own absences (GET) is always allowed.
 		if r.Method == "POST" || r.Method == "PUT" || r.Method == "DELETE" {
-			if !p.isBoosted(user.Username) {
+			if !p.isEditor(user.Username) {
 				p.forbidden(w)
 				return
 			}

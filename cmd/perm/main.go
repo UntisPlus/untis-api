@@ -16,18 +16,20 @@ var typeAliases = map[string]string{
 	"reconstruction": store.FeatureRecon,
 	"boosted":        store.FeatureBoosted,
 	"boost":          store.FeatureBoosted,
+	"editor":         store.FeatureEditor,
 }
 
 // boostedFeatures are per-user-only and cannot be applied via the global switch.
 var boostedFeatures = map[string]bool{
 	store.FeatureBoosted: true,
+	store.FeatureEditor:  true,
 }
 
 func main() {
 	db := flag.String("db", "untis.db", "sqlite database path")
 	username := flag.String("user", "", "username to grant/override access for (omit with -global)")
 	global := flag.Bool("global", false, "operate on the global switch that applies to all users")
-	elType := flag.String("type", "all", "permission: recon|boosted|all (case-insensitive)")
+	elType := flag.String("type", "all", "permission: recon|boosted|editor|all (case-insensitive)")
 	grant := flag.Bool("grant", false, "grant the permission")
 	revoke := flag.Bool("revoke", false, "revoke the permission")
 	clear := flag.Bool("clear", false, "clear all per-user overrides for -user (fall back to global)")
@@ -91,11 +93,12 @@ func main() {
 	allowed := *grant
 	for _, t := range types {
 		var err error
-		if *global {
+		switch {
+		case *global:
 			err = st.SetReconType(t, allowed)
-		} else if t == store.FeatureBoosted {
-			err = st.SetBoostedFlag(*username, allowed)
-		} else {
+		case t == store.FeatureBoosted || t == store.FeatureEditor:
+			err = st.SetPerm(*username, t, allowed)
+		default:
 			err = st.SetReconOverride(*username, t, allowed)
 		}
 		if err != nil {
@@ -103,9 +106,12 @@ func main() {
 		}
 		if *username != "" {
 			var on bool
-			if boostedFeatures[t] {
+			switch t {
+			case store.FeatureBoosted:
 				on, _ = st.BoostedAccess(*username)
-			} else {
+			case store.FeatureEditor:
+				on, _ = st.EditorAccess(*username)
+			default:
 				on, _ = st.ReconAccess(*username, t)
 			}
 			fmt.Printf("%s %s (effective for %q = %v)\n", t, verb(allowed), *username, on)
@@ -122,7 +128,7 @@ func resolveTypes(s string) []string {
 	if t, ok := typeAliases[strings.ToLower(s)]; ok {
 		return []string{t}
 	}
-	log.Fatalf("unknown permission %q (use recon|boosted|all)", s)
+	log.Fatalf("unknown permission %q (use recon|boosted|editor|all)", s)
 	return nil
 }
 

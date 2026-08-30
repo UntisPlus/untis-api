@@ -30,3 +30,39 @@ func (p *Proxy) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"uptime_sec": int64(time.Since(startedAt).Seconds()),
 	})
 }
+
+// handleMe reports the signed-in requester's effective permission level. It
+// requires an authenticated session (JSESSIONID cookie).
+func (p *Proxy) handleMe(w http.ResponseWriter, r *http.Request) {
+	user := p.sessionUser(r)
+	if user == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		p.writeJSON(w, map[string]any{"error": "not logged in"})
+		return
+	}
+	boosted, _ := p.store.BoostedAccess(user.Username)
+	editor, _ := p.store.EditorAccess(user.Username)
+	recon, _ := p.store.ReconAccess(user.Username, "TEACHER")
+
+	level := "basic"
+	if boosted && editor {
+		level = "boosted+editor"
+	} else if boosted {
+		level = "boosted"
+	} else if editor {
+		level = "editor"
+	} else if recon {
+		level = "recon"
+	}
+
+	p.writeJSON(w, map[string]any{
+		"username": user.Username,
+		"level":    level,
+		"permissions": map[string]any{
+			"recon":   recon,
+			"boosted": boosted,
+			"editor":  editor,
+		},
+	})
+}

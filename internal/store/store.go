@@ -384,14 +384,18 @@ const (
 	FeatureRecon = "recon"
 	// FeatureBoosted grants raw forwarding of all class/teacher/room/subject
 	// timetables through a saved teacher account (own personal timetable and the
-	// info center still use the user's own account) plus the absence/write edit
-	// methods. Reading your own absences is always allowed.
+	// info center still use the user's own account). Reading your own absences
+	// is always allowed. It does NOT include the write methods.
 	FeatureBoosted = "boosted"
+	// FeatureEditor grants the absence/lesson/subject write (editing) methods
+	// (set/add/update/delete/change). It is independent of boosted: a boosted
+	// user only gets editing while also holding the editor flag.
+	FeatureEditor = "editor"
 )
 
 // BoostFeatures are the per-user features that imply Boosted raw timetable
-// access (full teacher-account forwarding) plus absence/write editing. They are
-// mutually exclusive with the reconstruction flag.
+// access (full teacher-account forwarding). They are mutually exclusive with
+// the reconstruction flag.
 var BoostFeatures = []string{FeatureBoosted}
 
 // HasPerm reports whether a user has an explicit per-user permission row set to
@@ -426,8 +430,7 @@ func (s *Store) ReconAccess(username, elType string) (bool, error) {
 }
 
 // BoostedAccess reports whether a user effectively gets Boosted raw timetable
-// forwarding: they hold the boosted flag, or an absences/writes sub-perm (each
-// of which implies Boosted raw timetable access).
+// forwarding (they hold the boosted flag).
 func (s *Store) BoostedAccess(username string) (bool, error) {
 	for _, f := range BoostFeatures {
 		if ok, err := s.HasPerm(username, f); err == nil && ok {
@@ -435,6 +438,12 @@ func (s *Store) BoostedAccess(username string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// EditorAccess reports whether a user holds the editor flag (absence/lesson/
+// subject write methods).
+func (s *Store) EditorAccess(username string) (bool, error) {
+	return s.HasPerm(username, FeatureEditor)
 }
 
 // SetReconType sets the global switch for reconstruction across all users.
@@ -450,22 +459,28 @@ func (s *Store) SetReconOverride(username, elType string, allowed bool) error {
 	return s.setPerm(username, FeatureRecon, allowed)
 }
 
-// SetBoostedFlag grants or revokes the boosted (raw teacher forwarding +
-// absence/write editing) flag.
+// SetBoostedFlag grants or revokes the boosted (raw teacher forwarding) flag.
 func (s *Store) SetBoostedFlag(username string, allowed bool) error {
 	return s.setPerm(username, FeatureBoosted, allowed)
+}
+
+// SetPerm grants or revokes an arbitrary per-user permission feature.
+func (s *Store) SetPerm(username, feature string, allowed bool) error {
+	return s.setPerm(username, feature, allowed)
 }
 
 func (s *Store) setPerm(username, elType string, allowed bool) error {
 	username = norm(username)
 	// Reconstruction is mutually exclusive with Boosted: granting one side
 	// revokes the other side for the same user. The global switch ("*") is not a
-	// real user, so exclusion only applies to per-user overrides.
+	// real user, so exclusion only applies to per-user overrides. Editor is
+	// independent and never triggers the exclusion.
 	if username != globalPermUser && allowed {
-		if elType == FeatureRecon {
+		switch elType {
+		case FeatureRecon:
 			// Granting reconstruction revokes boosted.
 			_ = s.setPermFalse(username, FeatureBoosted)
-		} else {
+		case FeatureBoosted:
 			// Granting boosted revokes reconstruction.
 			_ = s.setPermFalse(username, FeatureRecon)
 		}

@@ -31,7 +31,7 @@ Usage:
 Commands:
   perms list [--user U]              show global switches and per-user overrides
   perms grant|revoke [--user U|--global] TYPE
-                                     grant/revoke recon|boosted (boosted is per-user only)
+                                     grant/revoke recon|boosted|editor (per-user only)
   perms clear --user U               drop a user's overrides (fall back to global)
   perms reset                        wipe all permissions (class-pool-only default)
 
@@ -101,11 +101,13 @@ var reconTypes = map[string]string{
 	"reconstruction": store.FeatureRecon,
 	"boosted":        store.FeatureBoosted,
 	"boost":          store.FeatureBoosted,
+	"editor":         store.FeatureEditor,
 }
 
 // boostedFeatures are per-user-only permissions; they cannot be applied globally.
 var boostedFeatures = map[string]bool{
 	store.FeatureBoosted: true,
+	store.FeatureEditor:  true,
 }
 
 func cmdPerms(st *store.Store, args []string) {
@@ -198,8 +200,8 @@ func permSet(st *store.Store, action string, args []string) {
 	var err error
 	if *global {
 		err = st.SetReconType(typ, allowed)
-	} else if typ == store.FeatureBoosted {
-		err = st.SetBoostedFlag(*user, allowed)
+	} else if boostedFeatures[typ] {
+		err = st.SetPerm(*user, typ, allowed)
 	} else {
 		err = st.SetReconOverride(*user, typ, allowed)
 	}
@@ -210,9 +212,12 @@ func permSet(st *store.Store, action string, args []string) {
 	if *user != "" {
 		target = *user
 		var on bool
-		if boostedFeatures[typ] {
+		switch typ {
+		case store.FeatureBoosted:
 			on, _ = st.BoostedAccess(*user)
-		} else {
+		case store.FeatureEditor:
+			on, _ = st.EditorAccess(*user)
+		default:
 			on, _ = st.ReconAccess(*user, typ)
 		}
 		fmt.Printf("%s %s for %q (effective=%v)\n", past(action), typ, *user, on)

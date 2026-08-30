@@ -264,3 +264,41 @@ func TestUsernameCaseSelfHealOnWrite(t *testing.T) {
 		t.Fatalf("expected a single merged row, got %d", n)
 	}
 }
+
+func TestEditorFlagIndependent(t *testing.T) {
+	st, err := Open(t.TempDir() + "/t.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if err := st.SetPerm("ed", FeatureEditor, true); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := st.EditorAccess("ed"); !v {
+		t.Fatal("editor should be allowed")
+	}
+	// editor does not imply boosted/raw forwarding
+	if v, _ := st.BoostedAccess("ed"); v {
+		t.Fatal("editor must not imply boosted")
+	}
+	// and boosted/recon XOR ignores editor
+	if err := st.SetBoostedFlag("ed", true); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := st.EditorAccess("ed"); !v {
+		t.Fatal("granting boosted must not revoke editor")
+	}
+	if v, _ := st.ReconAccess("ed", "TEACHER"); v {
+		t.Fatal("boosted should revoke recon")
+	}
+	if err := st.SetReconOverride("ed", "TEACHER", true); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := st.EditorAccess("ed"); !v {
+		t.Fatal("granting recon must not revoke editor")
+	}
+	if v, _ := st.EditorAccess("ED"); !v {
+		t.Fatal("editor access must be case-insensitive")
+	}
+}

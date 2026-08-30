@@ -103,10 +103,11 @@ image as `/usr/local/bin/untisctl`.)
 Access follows a two-flag tier model:
 
 | Tier | Flag | Scope | What you get |
-|---|---|---|---|
+|---|---|---|---|---|
 | **Basic** | *(none)* | everyone by default | Pool of classes + your own personal student timetable + **reading your own absences**. |
 | **Reconstruction** | `recon` | global switch **or** per-user override | Teacher / room / subject timetables **reconstructed 100% from pooled class data**. |
-| **Boosted** | `boosted` | per-user only | Class/teacher/room/subject timetables **raw-forwarded through any saved teacher account** — no reconstruction. Your own personal (STUDENT) timetable is served the same way, giving it teacher-grade visibility (e.g. unlimited future weeks). Also **unlocks absence + lesson/subject write (editing) methods**. If no teacher account is saved, boosted falls back to Basic. |
+| **Boosted** | `boosted` | per-user only | Class/teacher/room/subject timetables **raw-forwarded through any saved teacher account** — no reconstruction. Your own personal (STUDENT) timetable is served the same way, giving it teacher-grade visibility (e.g. unlimited future weeks). **No** write / absence-editing powers on its own. If no teacher account is saved, boosted falls back to Basic. |
+| **Editor** | `editor` | per-user only | Unlocks the absence + lesson/subject **write (editing) methods** (`set`/`add`/`update`/`delete`/`change`) for the user's own requests. Independent of the other flags — pair it with `boosted` for the full experience. |
 
 **Boosted XOR Recon**: the flags are mutually exclusive per user — granting one
 auto-revokes the other.
@@ -115,7 +116,8 @@ auto-revokes the other.
 untisctl perms list                              # show global switches + overrides
 untisctl perms grant --global recon              # enable recon for everyone
 untisctl perms grant --user Evadee recon         # per-user override
-untisctl perms grant --user Evadee boosted       # per-user boosted (raw + editing)
+untisctl perms grant --user Evadee boosted       # per-user boosted (raw forwarding)
+untisctl perms grant --user Evadee editor        # + absence/lesson/subject editing
 untisctl perms clear --user Evadee               # drop overrides -> fall back to global
 untisctl perms reset                             # wipe all -> Basic for everyone
 ```
@@ -123,12 +125,13 @@ untisctl perms reset                             # wipe all -> Basic for everyon
 > Flags come **before** the positional type: `perms grant --user X recon`
 > (Go's `flag` package does not intersperse flags after positionals).
 
-The `boosted` flag is **per-user only** (no `--global`).
+The `boosted` and `editor` flags are **per-user only** (no `--global`).
 
 Absence **reads** (own data, e.g. `getOwnAbsence`, `getPersonAbsence`,
 `getStudentAbsences2017`) are available to **everyone** by default; only the
 **write/mutation** methods (`set`/`add`/`update`/`delete`/`change` prefixes) need
-`boosted`.
+`editor`. `boosted` without `editor` gets raw timetable forwarding but **no**
+editing powers — grant both for the full experience.
 
 In the app, classes are always shown; **teacher/room/subject element types are
 hidden unless the user has recon or is boosted** (the masterData `displayAllowed`
