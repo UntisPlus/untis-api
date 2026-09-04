@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -42,6 +43,10 @@ type ClassToken struct {
 	School     string
 	ClassID    int64
 	PersonID   int64
+	ElementType string
+	ElementID   int64
+	Timezone    string
+	Days       int
 	CreatedAt  int64
 	LastAccess int64
 }
@@ -145,6 +150,31 @@ func Open(path string) (*Store, error) {
 	}
 	// migration: add person_id to class_tokens for older databases
 	if err := addColumnIfMissing(db, "class_tokens", "person_id", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return nil, err
+	}
+	// migration: element_type/element_id/timezone for calendar token generalization
+	if err := addColumnIfMissing(db, "class_tokens", "element_type", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
+	if err := addColumnIfMissing(db, "class_tokens", "element_id", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return nil, err
+	}
+	if err := addColumnIfMissing(db, "class_tokens", "timezone", "TEXT NOT NULL DEFAULT 'Europe/Berlin'"); err != nil {
+		return nil, err
+	}
+	// migration: add name column to recon_elements for CLI fuzzy lookup
+	if err := addColumnIfMissing(db, "recon_elements", "name", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
+	// migration: add days column to class_tokens for configurable lookahead
+	if err := addColumnIfMissing(db, "class_tokens", "days", "INTEGER NOT NULL DEFAULT 30"); err != nil {
+		return nil, err
+	}
+	// backfill: set element_type/element_id on existing tokens
+	if _, err := db.Exec(`UPDATE class_tokens SET element_type='CLASS', element_id=class_id WHERE class_id>0 AND element_type=''`); err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`UPDATE class_tokens SET element_type='STUDENT', element_id=person_id WHERE person_id>0 AND element_type=''`); err != nil {
 		return nil, err
 	}
 	st := &Store{db: db}
@@ -827,43 +857,56 @@ func (s *Store) scanUserRow(row *sql.Rows) (*User, error) {
 }
 
 func (s *Store) CreateClassToken(t *ClassToken) error {
-	_, err := s.db.Exec(`INSERT INTO class_tokens (token, school, class_id, person_id, created_at, last_access)
-		VALUES (?,?,?,?,?,?)`, t.Token, t.School, t.ClassID, t.PersonID, t.CreatedAt, t.LastAccess)
+	days := t.Days
+	if days <= 0 {
+		days = 30
+	}
+	_, err := s.db.Exec(`INSERT INTO class_tokens (token, school, class_id, person_id, element_type, element_id, timezone, days, created_at, last_access)
+		VALUES (?,?,?,?,?,?,?,?,?,?)`, t.Token, t.School, t.ClassID, t.PersonID, t.ElementType, t.ElementID, t.Timezone, days, t.CreatedAt, t.LastAccess)
 	return err
 }
 
 // ClassTokenForClass returns the existing token for a school+class, if any.
 func (s *Store) ClassTokenForClass(school string, classID int64) (*ClassToken, error) {
-	return s.scanClassToken(s.db.QueryRow(`SELECT token, school, class_id, person_id, created_at, last_access
+	return s.scanClassToken(s.db.QueryRow(`SELECT token, school, class_id, person_id, element_type, element_id, timezone, days, created_at, last_access
 		FROM class_tokens WHERE school=? AND class_id=?`, school, classID))
 }
 
 // ClassTokenForPerson returns the existing personal token for a school+person.
 func (s *Store) ClassTokenForPerson(school string, personID int64) (*ClassToken, error) {
-	return s.scanClassToken(s.db.QueryRow(`SELECT token, school, class_id, person_id, created_at, last_access
+	return s.scanClassToken(s.db.QueryRow(`SELECT token, school, class_id, person_id, element_type, element_id, timezone, days, created_at, last_access
 		FROM class_tokens WHERE school=? AND person_id=?`, school, personID))
 }
 
+// ClassTokenForElement returns the existing token for a school+element type+id.
+func (s *Store) ClassTokenForElement(school, elType string, elID int64) (*ClassToken, error) {
+	return s.scanClassToken(s.db.QueryRow(`SELECT token, school, class_id, person_id, element_type, element_id, timezone, days, created_at, last_access
+		FROM class_tokens WHERE school=? AND element_type=? AND element_id=?`, school, elType, elID))
+}
+
 func (s *Store) ClassTokenByToken(token string) (*ClassToken, error) {
-	return s.scanClassToken(s.db.QueryRow(`SELECT token, school, class_id, person_id, created_at, last_access
+	return s.scanClassToken(s.db.QueryRow(`SELECT token, school, class_id, person_id, element_type, element_id, timezone, days, created_at, last_access
 		FROM class_tokens WHERE token=?`, token))
 }
 
 func (s *Store) scanClassToken(row *sql.Row) (*ClassToken, error) {
 	var t ClassToken
-	err := row.Scan(&t.Token, &t.School, &t.ClassID, &t.PersonID, &t.CreatedAt, &t.LastAccess)
+	err := row.Scan(&t.Token, &t.School, &t.ClassID, &t.PersonID, &t.ElementType, &t.ElementID, &t.Timezone, &t.Days, &t.CreatedAt, &t.LastAccess)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	if t.Days <= 0 {
+		t.Days = 30
+	}
 	return &t, nil
 }
 
 // ListClassTokens returns every calendar subscription token, newest first.
 func (s *Store) ListClassTokens() ([]*ClassToken, error) {
-	rows, err := s.db.Query(`SELECT token, school, class_id, person_id, created_at, last_access
+	rows, err := s.db.Query(`SELECT token, school, class_id, person_id, element_type, element_id, timezone, days, created_at, last_access
 		FROM class_tokens ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -872,8 +915,11 @@ func (s *Store) ListClassTokens() ([]*ClassToken, error) {
 	var out []*ClassToken
 	for rows.Next() {
 		var t ClassToken
-		if err := rows.Scan(&t.Token, &t.School, &t.ClassID, &t.PersonID, &t.CreatedAt, &t.LastAccess); err != nil {
+		if err := rows.Scan(&t.Token, &t.School, &t.ClassID, &t.PersonID, &t.ElementType, &t.ElementID, &t.Timezone, &t.Days, &t.CreatedAt, &t.LastAccess); err != nil {
 			return nil, err
+		}
+		if t.Days <= 0 {
+			t.Days = 30
 		}
 		out = append(out, &t)
 	}
@@ -894,6 +940,182 @@ func (s *Store) DeleteClassToken(token string) (int64, error) {
 func (s *Store) TouchClassToken(token string, at int64) error {
 	_, err := s.db.Exec(`UPDATE class_tokens SET last_access=? WHERE token=?`, at, token)
 	return err
+}
+
+// ---------------------------------------------------------------------------
+// Master element names (for CLI fuzzy lookup)
+// ---------------------------------------------------------------------------
+
+// SaveMasterNames persists element names from the upstream master data fetch.
+// It updates the name column in recon_elements for matching IDs, inserting new
+// rows only if they don't already exist.
+func (s *Store) SaveMasterNames(elType string, names map[int64]string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for id, name := range names {
+		// Upsert: insert if missing, then update name
+		_, _ = tx.Exec(`INSERT OR IGNORE INTO recon_elements (el_type, el_id, name) VALUES (?,?,?)`, elType, id, name)
+		_, _ = tx.Exec(`UPDATE recon_elements SET name=? WHERE el_type=? AND el_id=?`, name, elType, id)
+	}
+	return tx.Commit()
+}
+
+// LookupElement resolves a user-provided name or numeric ID to an element ID.
+// It supports:
+//   - pure numeric input → returned as-is (validated to be > 0)
+//   - exact case-insensitive name match → returned
+//   - unique substring match → returned
+//   - multiple matches → error with candidates listed
+//   - no match → error with closest Levenshtein suggestions
+func (s *Store) LookupElement(elType, input string) (int64, error) {
+	// Pure numeric → use directly
+	if id, ok := parseID(input); ok {
+		return id, nil
+	}
+
+	// Fetch all elements of this type with names
+	rows, err := s.db.Query(`SELECT el_id, name FROM recon_elements WHERE el_type=? AND name!=''`, elType)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	type elem struct {
+		id   int64
+		name string
+	}
+	var all []elem
+	for rows.Next() {
+		var e elem
+		if err := rows.Scan(&e.id, &e.name); err != nil {
+			return 0, err
+		}
+		all = append(all, e)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if len(all) == 0 {
+		return 0, fmt.Errorf("no %s elements with known names in the database", elType)
+	}
+
+	query := strings.ToLower(input)
+
+	// 1. Exact match
+	for _, e := range all {
+		if strings.ToLower(e.name) == query {
+			return e.id, nil
+		}
+	}
+
+	// 2. Substring match
+	var subMatches []elem
+	for _, e := range all {
+		if strings.Contains(strings.ToLower(e.name), query) {
+			subMatches = append(subMatches, e)
+		}
+	}
+	if len(subMatches) == 1 {
+		return subMatches[0].id, nil
+	}
+	if len(subMatches) > 1 {
+		names := make([]string, len(subMatches))
+		for i, e := range subMatches {
+			names[i] = fmt.Sprintf("%s (id=%d)", e.name, e.id)
+		}
+		return 0, fmt.Errorf("ambiguous %q — did you mean:\n  %s", input, strings.Join(names, "\n  "))
+	}
+
+	// 3. Levenshtein suggestions
+	type candidate struct {
+		name string
+		id   int64
+		dist int
+	}
+	var cands []candidate
+	for _, e := range all {
+		d := levenshtein(strings.ToLower(e.name), query)
+		if d <= 3 {
+			cands = append(cands, candidate{e.name, e.id, d})
+		}
+	}
+	if len(cands) > 0 {
+		// Sort by distance, then alphabetically
+		for i := 1; i < len(cands); i++ {
+			for j := i; j > 0 && (cands[j].dist < cands[j-1].dist ||
+				(cands[j].dist == cands[j-1].dist && cands[j].name < cands[j-1].name)); j-- {
+				cands[j], cands[j-1] = cands[j-1], cands[j]
+			}
+		}
+		names := make([]string, 0, len(cands))
+		for _, c := range cands {
+			names = append(names, fmt.Sprintf("%s (id=%d)", c.name, c.id))
+		}
+		return 0, fmt.Errorf("%q not found — did you mean:\n  %s", input, strings.Join(names, "\n  "))
+	}
+
+	return 0, fmt.Errorf("%q not found among %ss", input, elType)
+}
+
+func parseID(s string) (int64, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+	}
+	var id int64
+	for _, c := range s {
+		id = id*10 + int64(c-'0')
+	}
+	return id, id > 0
+}
+
+// levenshtein computes the edit distance between two strings.
+func levenshtein(a, b string) int {
+	la, lb := len(a), len(b)
+	if la == 0 {
+		return lb
+	}
+	if lb == 0 {
+		return la
+	}
+	prev := make([]int, lb+1)
+	curr := make([]int, lb+1)
+	for j := 0; j <= lb; j++ {
+		prev[j] = j
+	}
+	for i := 1; i <= la; i++ {
+		curr[0] = i
+		for j := 1; j <= lb; j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			curr[j] = min3(curr[j-1]+1, prev[j]+1, prev[j-1]+cost)
+		}
+		prev, curr = curr, prev
+	}
+	return prev[lb]
+}
+
+func min3(a, b, c int) int {
+	if a < b {
+		if a < c {
+			return a
+		}
+		return c
+	}
+	if b < c {
+		return b
+	}
+	return c
 }
 
 // PeriodRow is the persistent snapshot of one period used for change detection.

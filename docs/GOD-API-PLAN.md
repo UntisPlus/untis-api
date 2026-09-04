@@ -75,6 +75,21 @@ triggers the exclusion.
 - Data source: recon → reconstruction from pooled data; boosted → raw from saved
   teacher accounts. Non-overlapping.
 
+## Calendar subscriptions
+
+Token-based `.ics` feeds for all element types:
+
+- **class** → pool members only
+- **personal/student** → session user only
+- **teacher/room/subject** → requires recon OR boosted
+
+POST body accepts `classId`, `personal`, `teacherId`, `roomId`, `subjectId`
+(exactly one). Optional `timezone` (default `Europe/Berlin`).
+
+`GET /me` returns `{username, level, permissions}` for the current session.
+
+CLI: `untisctl calendar create|list|revoke` with fuzzy name lookup.
+
 ## Files (implementation notes)
 
 - `internal/store/store.go` — `FeatureRecon`/`FeatureBoosted`/`FeatureEditor`,
@@ -88,5 +103,10 @@ triggers the exclusion.
   in passthrough/REST (absence reads default-allowed); boosted raw for weekly
   REST elements (skips STUDENT).
 - `cmd/untisctl/main.go`, `cmd/perm/main.go` — recon|boosted|editor grantable
-  features + auto-revoke (XOR) + perms list display.
+  features + auto-revoke (XOR) + perms list display. Calendar create|list|revoke
+  with fuzzy name lookup via `LookupElement`.
+- `internal/proxy/calendar.go` — `handleCalendarToken` (all element types),
+  `handleCalendarICS` (branches on element type, configurable timezone).
+- `internal/store/store.go` — `LookupElement` (fuzzy name resolution),
+  `SaveMasterNames`, `ClassToken` struct with `ElementType`/`ElementID`/`Timezone`.
 - `README.md` — documents the tiers.

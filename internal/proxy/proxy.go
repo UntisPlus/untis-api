@@ -147,6 +147,11 @@ func (p *Proxy) masterData(school string) *masterDataCache {
 	}
 	p.md = md
 	p.mdNext = time.Now().Add(time.Hour)
+	// Persist names to DB for CLI fuzzy lookup (fire-and-forget).
+	_ = p.store.SaveMasterNames("TEACHER", md.teachers)
+	_ = p.store.SaveMasterNames("ROOM", md.rooms)
+	_ = p.store.SaveMasterNames("SUBJECT", md.subjects)
+	_ = p.store.SaveMasterNames("CLASS", md.klassen)
 	return p.md
 }
 

@@ -383,6 +383,56 @@ func (p *Proxy) elementPeriods(school, elType string, elID int64, start, end str
 	return out, nil
 }
 
+// fetchElementRaw fetches a teacher/room/subject timetable directly from the
+// upstream WebUntis server via a boosted source account.  This returns the raw
+// upstream periods (no reconstruction, no caching) — the same data a boosted
+// user sees in the app.
+func (p *Proxy) fetchElementRaw(school, elType string, elID int64, start, end string) ([]map[string]any, error) {
+	owner := p.boostedSource()
+	if owner == nil {
+		return nil, fmt.Errorf("no boosted source account available")
+	}
+	// Build a getTimetable2017 body for the element
+	var elTypeUpstream string
+	switch elType {
+	case "TEACHER":
+		elTypeUpstream = "TEACHER"
+	case "ROOM":
+		elTypeUpstream = "ROOM"
+	case "SUBJECT":
+		elTypeUpstream = "SUBJECT"
+	default:
+		return nil, fmt.Errorf("unsupported element type %q", elType)
+	}
+	body, _ := json.Marshal(map[string]any{
+		"id": "untis-proxy-cal", "jsonrpc": "2.0", "method": "getTimetable2017",
+		"params": []any{map[string]any{
+			"id": elID, "type": elTypeUpstream,
+			"startDate": start, "endDate": end,
+			"masterDataTimestamp": 0, "timetableTimestamp": 0, "timetableTimestamps": []any{},
+		}},
+	})
+	newBody, err := p.rewriteAuthForOwner(school, body, owner)
+	if err != nil {
+		return nil, err
+	}
+	b, _, _, err := p.untis.RawIntern(school, "", "getTimetable2017", newBody)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Result struct {
+			Timetable struct {
+				Periods []map[string]any `json:"periods"`
+			} `json:"timetable"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(b, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Result.Timetable.Periods, nil
+}
+
 // scanClass enumerates teachers/rooms/subjects for one class across the school
 // year by fetching week-by-week (the real server caps ranges at ~2 weeks).
 func (p *Proxy) scanClass(school string, classID int64, yearStart, yearEnd string) {

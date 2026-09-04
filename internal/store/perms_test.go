@@ -302,3 +302,110 @@ func TestEditorFlagIndependent(t *testing.T) {
 		t.Fatal("editor access must be case-insensitive")
 	}
 }
+
+func TestLookupElement_NumericID(t *testing.T) {
+	st, _ := Open(t.TempDir() + "/t.db")
+	// Pure numeric input should be returned as-is (no name needed).
+	id, err := st.LookupElement("TEACHER", "123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != 123 {
+		t.Fatalf("expected 123, got %d", id)
+	}
+}
+
+func TestLookupElement_ExactMatch(t *testing.T) {
+	st, _ := Open(t.TempDir() + "/t.db")
+	st.SaveMasterNames("TEACHER", map[int64]string{10: "Müller", 20: "Schmidt"})
+
+	id, err := st.LookupElement("TEACHER", "Müller")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != 10 {
+		t.Fatalf("expected 10, got %d", id)
+	}
+	// Case insensitive
+	id, err = st.LookupElement("TEACHER", "müller")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != 10 {
+		t.Fatalf("expected 10, got %d", id)
+	}
+}
+
+func TestLookupElement_SubstringMatch(t *testing.T) {
+	st, _ := Open(t.TempDir() + "/t.db")
+	st.SaveMasterNames("ROOM", map[int64]string{5: "Aula", 6: "Aula EG", 7: "Bibliothek"})
+
+	// Unique substring
+	id, err := st.LookupElement("ROOM", "Bib")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != 7 {
+		t.Fatalf("expected 7, got %d", id)
+	}
+}
+
+func TestLookupElement_Ambiguous(t *testing.T) {
+	st, _ := Open(t.TempDir() + "/t.db")
+	st.SaveMasterNames("ROOM", map[int64]string{5: "Aula", 6: "Aula EG", 7: "Bibliothek"})
+
+	// "aul" is substring of both "Aula" and "Aula EG" — ambiguous
+	_, err := st.LookupElement("ROOM", "aul")
+	if err == nil {
+		t.Fatal("expected error for ambiguous match")
+	}
+	if !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("expected 'ambiguous' in error, got: %v", err)
+	}
+}
+
+func TestLookupElement_NoMatch(t *testing.T) {
+	st, _ := Open(t.TempDir() + "/t.db")
+	st.SaveMasterNames("SUBJECT", map[int64]string{1: "BIO", 2: "MAT", 3: "DEU"})
+
+	_, err := st.LookupElement("SUBJECT", "XYZ")
+	if err == nil {
+		t.Fatal("expected error for no match")
+	}
+	// Should suggest close matches
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected 'not found' in error, got: %v", err)
+	}
+}
+
+func TestLookupElement_EmptyType(t *testing.T) {
+	st, _ := Open(t.TempDir() + "/t.db")
+	_, err := st.LookupElement("TEACHER", "foo")
+	if err == nil {
+		t.Fatal("expected error for empty DB")
+	}
+	if !strings.Contains(err.Error(), "no TEACHER elements") {
+		t.Fatalf("expected 'no TEACHER elements' in error, got: %v", err)
+	}
+}
+
+func TestSaveMasterNames_Upsert(t *testing.T) {
+	st, _ := Open(t.TempDir() + "/t.db")
+	st.SaveMasterNames("TEACHER", map[int64]string{1: "Müller"})
+	st.SaveMasterNames("TEACHER", map[int64]string{1: "Müller (neu)", 2: "Schmidt"})
+
+	id, err := st.LookupElement("TEACHER", "Müller (neu)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != 1 {
+		t.Fatalf("expected 1, got %d", id)
+	}
+	id, err = st.LookupElement("TEACHER", "Schmidt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != 2 {
+		t.Fatalf("expected 2, got %d", id)
+	}
+}

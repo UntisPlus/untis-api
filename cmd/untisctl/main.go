@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -45,8 +47,18 @@ Commands:
   pool list                          show pooled classes and their owners
   pool owners                        show which user(s) own each class
 
-  tokens list                        list calendar subscription tokens
-  tokens revoke TOKEN                revoke a calendar token
+  calendar create [FLAGS]            create a calendar subscription token
+    --class ID                         class timetable (must be in pool)
+    --teacher NAME_OR_ID               teacher timetable (fuzzy name lookup)
+    --room NAME_OR_ID                  room timetable (fuzzy name lookup)
+    --subject NAME_OR_ID               subject timetable (fuzzy name lookup)
+    --personal                         personal student timetable (self)
+    --personal --user U                personal timetable for user U
+  calendar list                      list all calendar tokens
+  calendar revoke TOKEN              revoke a calendar token
+
+  tokens list                        alias for calendar list
+  tokens revoke TOKEN                alias for calendar revoke
 
   status                             db stats: users, pool, perms, recon, tokens
 
@@ -78,8 +90,8 @@ Run 'untisctl <command> -h' for per-command flags.
 		cmdUsers(st, flag.Args()[1:], *server, *school)
 	case "pool":
 		cmdPool(st, flag.Args()[1:])
-	case "tokens":
-		cmdTokens(st, flag.Args()[1:])
+	case "calendar", "tokens":
+		cmdCalendar(st, flag.Args()[1:])
 	case "status":
 		cmdStatus(st)
 	default:
@@ -445,20 +457,22 @@ func poolList(st *store.Store) {
 }
 
 // ---------------------------------------------------------------------------
-// tokens
+// calendar (also aliased as "tokens" for backward compat)
 // ---------------------------------------------------------------------------
 
-func cmdTokens(st *store.Store, args []string) {
+func cmdCalendar(st *store.Store, args []string) {
 	if len(args) == 0 {
-		tokensList(st)
+		calendarList(st)
 		return
 	}
 	switch args[0] {
+	case "create":
+		calendarCreate(st, args[1:])
 	case "list":
-		tokensList(st)
+		calendarList(st)
 	case "revoke":
 		if len(args) < 2 {
-			fatal("tokens revoke requires a TOKEN")
+			fatal("calendar revoke requires a TOKEN")
 		}
 		n, err := st.DeleteClassToken(args[1])
 		if err != nil {
@@ -470,33 +484,210 @@ func cmdTokens(st *store.Store, args []string) {
 			fmt.Println("token revoked")
 		}
 	default:
-		fatal("unknown tokens subcommand %q", args[0])
+		fatal("unknown calendar subcommand %q (use create|list|revoke)", args[0])
 	}
 }
 
-func tokensList(st *store.Store) {
+func calendarCreate(st *store.Store, args []string) {
+	fs := flag.NewFlagSet("calendar create", flag.ExitOnError)
+	classID := fs.Int64("class", 0, "class ID (must be in pool)")
+	teacher := fs.String("teacher", "", "teacher name or ID (fuzzy lookup)")
+	room := fs.String("room", "", "room name or ID (fuzzy lookup)")
+	subject := fs.String("subject", "", "subject name or ID (fuzzy lookup)")
+	personal := fs.Bool("personal", false, "personal student timetable (self)")
+	user := fs.String("user", "", "personal timetable for this user (with --personal)")
+	school := fs.String("school", "schuldorf", "school name")
+	timezone := fs.String("timezone", "Europe/Berlin", "timezone for ICS events")
+	days := fs.Int("days", 30, "lookahead horizon in days (1-365)")
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), `Create a calendar subscription token.
+
+Exactly one of --class, --teacher, --room, --subject, or --personal is required.
+
+Examples:
+  untisctl calendar create --class 4419
+  untisctl calendar create --teacher Müller
+  untisctl calendar create --room Aula
+  untisctl calendar create --subject BIO
+  untisctl calendar create --personal
+  untisctl calendar create --personal --user evadee`)
+	}
+	if err := fs.Parse(args); err != nil {
+		return
+	}
+	if *days < 1 {
+		*days = 1
+	}
+	if *days > 365 {
+		*days = 365
+	}
+
+	// Count targets
+	nTargets := 0
+	if *classID > 0 {
+		nTargets++
+	}
+	if *teacher != "" {
+		nTargets++
+	}
+	if *room != "" {
+		nTargets++
+	}
+	if *subject != "" {
+		nTargets++
+	}
+	if *personal {
+		nTargets++
+	}
+	if nTargets != 1 {
+		fatal("exactly one of --class, --teacher, --room, --subject, or --personal is required")
+	}
+
+	// Resolve element
+	var elType string
+	var elID int64
+	switch {
+	case *classID > 0:
+		elType = "CLASS"
+		elID = *classID
+		// Validate class is in pool
+		ok, err := st.PoolContains(elID)
+		if err != nil || !ok {
+			fatal("class %d is not in the pool", elID)
+		}
+	case *teacher != "":
+		elType = "TEACHER"
+		var err error
+		elID, err = st.LookupElement("TEACHER", *teacher)
+		if err != nil {
+			fatal("teacher lookup: %v", err)
+		}
+	case *room != "":
+		elType = "ROOM"
+		var err error
+		elID, err = st.LookupElement("ROOM", *room)
+		if err != nil {
+			fatal("room lookup: %v", err)
+		}
+	case *subject != "":
+		elType = "SUBJECT"
+		var err error
+		elID, err = st.LookupElement("SUBJECT", *subject)
+		if err != nil {
+			fatal("subject lookup: %v", err)
+		}
+	case *personal:
+		elType = "STUDENT"
+		if *user != "" {
+			// Look up the user's person ID
+			u, err := st.GetUser(*user)
+			if err != nil || u == nil {
+				fatal("user %q not found", *user)
+			}
+			if u.PersonID <= 0 {
+				fatal("user %q has no person ID", *user)
+			}
+			elID = u.PersonID
+		} else {
+			// For personal without --user, we need at least one user with a
+			// person ID. In the CLI context (no session), just use the first
+			// student user.
+			fatal("--personal requires --user when used from the CLI")
+		}
+	}
+
+	// Check for existing token
+	existing, err := st.ClassTokenForElement(*school, elType, elID)
+	if err != nil {
+		fatal("store: %v", err)
+	}
+	if existing != nil {
+		fmt.Printf("existing token for %s %d:\n", elType, elID)
+		printToken(existing)
+		return
+	}
+
+	// Create new token
+	now := time.Now().Unix()
+	tok := &store.ClassToken{
+		Token:       generateToken(),
+		School:      *school,
+		ElementType: elType,
+		ElementID:   elID,
+		ClassID:     elID, // backward compat
+		Timezone:    *timezone,
+		Days:        *days,
+		CreatedAt:   now,
+		LastAccess:  now,
+	}
+	if err := st.CreateClassToken(tok); err != nil {
+		fatal("create token: %v", err)
+	}
+
+	fmt.Printf("created %s calendar token:\n", strings.ToLower(elType))
+	printToken(tok)
+}
+
+func calendarList(st *store.Store) {
 	tokens, err := st.ListClassTokens()
 	if err != nil {
-		fatal("tokens list: %v", err)
+		fatal("calendar list: %v", err)
 	}
 	if len(tokens) == 0 {
 		fmt.Println("no calendar tokens")
 		return
 	}
-	fmt.Printf("%-8s %-12s %-34s %-22s\n", "KIND", "SCHOOL", "TOKEN", "LAST ACCESS")
+	fmt.Printf("%-10s %-12s %-8s %-34s %-5s %-22s %s\n", "TYPE", "SCHOOL", "ID", "TOKEN", "DAYS", "LAST ACCESS", "TIMEZONE")
 	for _, t := range tokens {
-		kind := "class"
-		target := fmt.Sprintf("%d", t.ClassID)
-		if t.PersonID > 0 {
-			kind = "person"
-			target = fmt.Sprintf("p%d", t.PersonID)
+		elType := t.ElementType
+		if elType == "" {
+			if t.PersonID > 0 {
+				elType = "STUDENT"
+			} else {
+				elType = "CLASS"
+			}
+		}
+		elID := t.ElementID
+		if elID == 0 {
+			if t.PersonID > 0 {
+				elID = t.PersonID
+			} else {
+				elID = t.ClassID
+			}
 		}
 		last := "never"
 		if t.LastAccess > 0 {
 			last = time.Unix(t.LastAccess, 0).Format(time.RFC3339)
 		}
-		fmt.Printf("%-8s %-12s %-34s %-22s (%s)\n", kind, t.School, t.Token, last, target)
+		tz := t.Timezone
+		if tz == "" {
+			tz = "Europe/Berlin"
+		}
+		d := t.Days
+		if d <= 0 {
+			d = 30
+		}
+		fmt.Printf("%-10s %-12s %-8d %-34s %-5d %-22s %s\n", elType, t.School, elID, t.Token, d, last, tz)
 	}
+}
+
+func printToken(t *store.ClassToken) {
+	days := t.Days
+	if days <= 0 {
+		days = 30
+	}
+	fmt.Printf("  token:     %s\n", t.Token)
+	fmt.Printf("  url:       https://api-untis.deelabs.tech/api/calendar/%s.ics\n", t.Token)
+	fmt.Printf("  type:      %s\n", t.ElementType)
+	fmt.Printf("  id:        %d\n", t.ElementID)
+	fmt.Printf("  timezone:  %s\n", t.Timezone)
+	fmt.Printf("  days:      %d (horizon: %s)\n", days, time.Now().AddDate(0, 0, days).Format("2006-01-02"))
+}
+
+func generateToken() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // ---------------------------------------------------------------------------

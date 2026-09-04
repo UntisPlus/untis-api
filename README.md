@@ -61,15 +61,23 @@ GET /status
 **Calendar subscriptions** (token-based, stable)
 
 ```
-POST /api/calendar/token      # request a class or personal token
+POST /api/calendar/token      # request a calendar subscription token
 GET  /api/calendar/{token}.ics   # the iCal feed (Outlook/Google subscribe)
+GET  /me                        # current user info + permission level
 ```
 
-`POST /api/calendar/token` requires a logged-in session.
+`POST /api/calendar/token` requires a logged-in session. Exactly one target:
 
-- `{"classId": <id>}` → a token bound to the **class** timetable (everyone in the pool).
-- `{"personal": true}` → a personal **STUDENT** token for the session user
-  (their real per-student schedule, fewer lessons than the whole class).
+| Field | Access | Description |
+|---|---|---|
+| `{"classId": 4419}` | pool members | class timetable |
+| `{"personal": true}` | self | personal student timetable |
+| `{"teacherId": 123}` | recon or boosted | teacher timetable (reconstructed) |
+| `{"roomId": 456}` | recon or boosted | room timetable (reconstructed) |
+| `{"subjectId": 789}` | recon or boosted | subject timetable (reconstructed) |
+
+Optional: `{"timezone": "Europe/Berlin"}` (default). All element types accept a
+timezone to set on the ICS feed.
 
 **Timetable change detection**
 
@@ -163,12 +171,22 @@ untisctl pool list   # pooled classes + their owner account
 
 A class is in the pool as soon as any user belongs to it (`class_id` set).
 
-### tokens — calendar subscriptions
+### calendar — calendar subscriptions
 
 ```sh
-untisctl tokens list          # all class/personal calendar tokens
-untisctl tokens revoke <tok>  # revoke one
+untisctl calendar list                                # all tokens
+untisctl calendar create --class 4419                 # class timetable
+untisctl calendar create --teacher Müller             # teacher (fuzzy name)
+untisctl calendar create --room Aula                  # room (fuzzy name)
+untisctl calendar create --subject BIO                # subject (fuzzy name)
+untisctl calendar create --personal --user evadee     # personal timetable
+untisctl calendar revoke <tok>                        # revoke one
+untisctl tokens list                                  # alias for calendar list
+untisctl tokens revoke <tok>                          # alias for calendar revoke
 ```
+
+Fuzzy name lookup: exact match → substring match → Levenshtein suggestions.
+Numeric IDs pass through directly. Ambiguous matches list all candidates.
 
 ### status — database stats
 
@@ -276,12 +294,16 @@ docker push datpersothere/untis-proxy:v1.2.0
 
 ---
 
-## Generating a personal calendar link
+## Generating a calendar link
 
-Log in as the student (keylogin TOTP), then request a personal token:
+Log in as the student (keylogin TOTP), then request a token:
 
 ```
-POST /api/calendar/token   {"personal": true}
+POST /api/calendar/token   {"personal": true}           # personal timetable
+POST /api/calendar/token   {"classId": 4419}            # class timetable
+POST /api/calendar/token   {"teacherId": 123}           # teacher (recon/boosted)
+POST /api/calendar/token   {"roomId": 456}              # room (recon/boosted)
+POST /api/calendar/token   {"subjectId": 789}           # subject (recon/boosted)
 ```
 
 which returns a stable URL like:
@@ -291,8 +313,6 @@ https://<host>/api/calendar/7aff8e9dd4707fde8c992c3902be0c96.ics
 ```
 
 Paste that into **Outlook → Add calendar → From internet** (or iCloud/Google).
-The feed is per-student (from WebUntis' `STUDENT` endpoint), so it only shows
-that person's own lessons.
 
 **Timing:** the server re-fetches at most `-ttl` (5 min) stale.
 Calendar providers re-subscribe on their own schedule (often hours), so expect
