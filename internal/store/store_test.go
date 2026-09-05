@@ -47,7 +47,7 @@ func TestReplaceClassSnapshotDiff(t *testing.T) {
 	// one CHANGED, one REMOVED, one ADDED
 	v2 := []PeriodRow{
 		{PeriodID: 100, Start: "a1", End: "b1", Subject: "S1-NEW"}, // changed
-		{PeriodID: 300, Start: "a3", End: "b3", Subject: "S3"},      // added
+		{PeriodID: 300, Start: "a3", End: "b3", Subject: "S3"},     // added
 	}
 	changed, err = st.ReplaceClassSnapshot("s", 1, v2, 2, "")
 	if err != nil {

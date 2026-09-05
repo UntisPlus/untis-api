@@ -306,7 +306,7 @@ func TestEditorFlagIndependent(t *testing.T) {
 func TestLookupElement_NumericID(t *testing.T) {
 	st, _ := Open(t.TempDir() + "/t.db")
 	// Pure numeric input should be returned as-is (no name needed).
-	id, err := st.LookupElement("TEACHER", "123")
+	id, err := st.LookupElement("schuldorf", "TEACHER", "123")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,9 +317,9 @@ func TestLookupElement_NumericID(t *testing.T) {
 
 func TestLookupElement_ExactMatch(t *testing.T) {
 	st, _ := Open(t.TempDir() + "/t.db")
-	st.SaveMasterNames("TEACHER", map[int64]string{10: "Müller", 20: "Schmidt"})
+	st.SaveMasterNames("schuldorf", "TEACHER", map[int64]string{10: "Müller", 20: "Schmidt"})
 
-	id, err := st.LookupElement("TEACHER", "Müller")
+	id, err := st.LookupElement("schuldorf", "TEACHER", "Müller")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +327,7 @@ func TestLookupElement_ExactMatch(t *testing.T) {
 		t.Fatalf("expected 10, got %d", id)
 	}
 	// Case insensitive
-	id, err = st.LookupElement("TEACHER", "müller")
+	id, err = st.LookupElement("schuldorf", "TEACHER", "müller")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,10 +338,10 @@ func TestLookupElement_ExactMatch(t *testing.T) {
 
 func TestLookupElement_SubstringMatch(t *testing.T) {
 	st, _ := Open(t.TempDir() + "/t.db")
-	st.SaveMasterNames("ROOM", map[int64]string{5: "Aula", 6: "Aula EG", 7: "Bibliothek"})
+	st.SaveMasterNames("schuldorf", "ROOM", map[int64]string{5: "Aula", 6: "Aula EG", 7: "Bibliothek"})
 
 	// Unique substring
-	id, err := st.LookupElement("ROOM", "Bib")
+	id, err := st.LookupElement("schuldorf", "ROOM", "Bib")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,10 +352,10 @@ func TestLookupElement_SubstringMatch(t *testing.T) {
 
 func TestLookupElement_Ambiguous(t *testing.T) {
 	st, _ := Open(t.TempDir() + "/t.db")
-	st.SaveMasterNames("ROOM", map[int64]string{5: "Aula", 6: "Aula EG", 7: "Bibliothek"})
+	st.SaveMasterNames("schuldorf", "ROOM", map[int64]string{5: "Aula", 6: "Aula EG", 7: "Bibliothek"})
 
 	// "aul" is substring of both "Aula" and "Aula EG" — ambiguous
-	_, err := st.LookupElement("ROOM", "aul")
+	_, err := st.LookupElement("schuldorf", "ROOM", "aul")
 	if err == nil {
 		t.Fatal("expected error for ambiguous match")
 	}
@@ -366,9 +366,9 @@ func TestLookupElement_Ambiguous(t *testing.T) {
 
 func TestLookupElement_NoMatch(t *testing.T) {
 	st, _ := Open(t.TempDir() + "/t.db")
-	st.SaveMasterNames("SUBJECT", map[int64]string{1: "BIO", 2: "MAT", 3: "DEU"})
+	st.SaveMasterNames("schuldorf", "SUBJECT", map[int64]string{1: "BIO", 2: "MAT", 3: "DEU"})
 
-	_, err := st.LookupElement("SUBJECT", "XYZ")
+	_, err := st.LookupElement("schuldorf", "SUBJECT", "XYZ")
 	if err == nil {
 		t.Fatal("expected error for no match")
 	}
@@ -380,7 +380,7 @@ func TestLookupElement_NoMatch(t *testing.T) {
 
 func TestLookupElement_EmptyType(t *testing.T) {
 	st, _ := Open(t.TempDir() + "/t.db")
-	_, err := st.LookupElement("TEACHER", "foo")
+	_, err := st.LookupElement("schuldorf", "TEACHER", "foo")
 	if err == nil {
 		t.Fatal("expected error for empty DB")
 	}
@@ -391,17 +391,17 @@ func TestLookupElement_EmptyType(t *testing.T) {
 
 func TestSaveMasterNames_Upsert(t *testing.T) {
 	st, _ := Open(t.TempDir() + "/t.db")
-	st.SaveMasterNames("TEACHER", map[int64]string{1: "Müller"})
-	st.SaveMasterNames("TEACHER", map[int64]string{1: "Müller (neu)", 2: "Schmidt"})
+	st.SaveMasterNames("schuldorf", "TEACHER", map[int64]string{1: "Müller"})
+	st.SaveMasterNames("schuldorf", "TEACHER", map[int64]string{1: "Müller (neu)", 2: "Schmidt"})
 
-	id, err := st.LookupElement("TEACHER", "Müller (neu)")
+	id, err := st.LookupElement("schuldorf", "TEACHER", "Müller (neu)")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if id != 1 {
 		t.Fatalf("expected 1, got %d", id)
 	}
-	id, err = st.LookupElement("TEACHER", "Schmidt")
+	id, err = st.LookupElement("schuldorf", "TEACHER", "Schmidt")
 	if err != nil {
 		t.Fatal(err)
 	}

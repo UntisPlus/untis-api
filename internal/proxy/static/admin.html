@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>untis-proxy admin</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 1rem;
+         background: #111216; color: #e6e6e6; }
+  h1 { font-size: 1.3rem; margin-top: 0; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: .6rem; margin-bottom: 1.2rem; }
+  .card { background: #1c1e26; border: 1px solid #2a2d37; border-radius: 8px; padding: .7rem .9rem; }
+  .card .num { font-size: 1.6rem; font-weight: 600; }
+  .card .lbl { font-size: .78rem; color: #9aa0ae; }
+  section { background: #1c1e26; border: 1px solid #2a2d37; border-radius: 8px; padding: .8rem 1rem; margin-bottom: 1rem; }
+  h2 { font-size: 1rem; margin: 0 0 .6rem; }
+  table { width: 100%; border-collapse: collapse; font-size: .86rem; }
+  th, td { text-align: left; padding: .35rem .4rem; border-bottom: 1px solid #262933; }
+  th { color: #9aa0ae; font-weight: 500; }
+  button { background: #3b82f6; border: 0; color: white; border-radius: 6px; padding: .35rem .7rem; cursor: pointer; font-size: .8rem; }
+  button.danger { background: #dc2626; }
+  button.mini { padding: .15rem .4rem; font-size: .72rem; }
+  input, select { background: #14161c; border: 1px solid #353947; color: #e6e6e6; border-radius: 6px; padding: .35rem .5rem; }
+  .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+  pre.log { background:#0d0f14; padding:.6rem; border-radius:6px; max-height:16rem; overflow:auto; font-size:.76rem; }
+</style>
+</head>
+<body>
+<h1>untis-proxy&nbsp;admin</h1>
+
+<div class="cards" id="cards"></div>
+
+<section>
+  <h2>Users</h2>
+  <div class="row" style="margin-bottom:.5rem">
+    <input id="uName" placeholder="username">
+    <button onclick="addUser()">promote to admin</button>
+  </div>
+  <table id="users"><thead><tr><th>user</th><th>class</th><th>school</th><th>admin</th><th>recon</th><th>boosted</th><th>editor</th><th></th></tr></thead><tbody></tbody></table>
+</section>
+
+<section>
+  <h2>Schools</h2>
+  <div class="row" style="margin-bottom:.5rem">
+    <input id="sName" placeholder="school login name">
+    <button onclick="addSchool()">register</button>
+  </div>
+  <table id="schools"><thead><tr><th>school</th><th>added</th><th>last seen</th></tr></thead><tbody></tbody></table>
+</section>
+
+<section>
+  <h2>Webhooks</h2>
+  <div class="row" style="margin-bottom:.5rem">
+    <select id="whSchool"></select>
+    <input id="whClass" placeholder="classId (0 = all)" style="width:7rem">
+    <input id="whUrl" placeholder="https://.../hook" style="flex:1">
+    <input id="whSecret" placeholder="secret (optional)" style="width:12rem">
+    <button onclick="addWebhook()">add</button>
+  </div>
+  <table id="webhooks"><thead><tr><th>school</th><th>class</th><th>url</th><th></th></tr></thead><tbody></tbody></table>
+</section>
+
+<section>
+  <h2>ntfy topics</h2>
+  <div class="row" style="margin-bottom:.5rem">
+    <select id="ntfySchool"></select>
+    <input id="ntfyClass" placeholder="classId (0 = all)" style="width:7rem">
+    <input id="ntfyTopic" placeholder="topic" style="flex:1">
+    <button onclick="addNtfy()">add</button>
+  </div>
+  <table id="ntfy"><thead><tr><th>school</th><th>class</th><th>topic</th><th></th></tr></thead><tbody></tbody></table>
+</section>
+
+<section id="tokensSection">
+  <h2>Calendar tokens <button class="mini" onclick="loadTokens()">refresh</button></h2>
+  <table id="tokens"><thead><tr><th>token</th><th>school</th><th>type</th><th>id</th><th>days</th><th></th></tr></thead><tbody></tbody></table>
+</section>
+
+<section>
+  <h2>Pool</h2>
+  <div class="row" style="margin-bottom:.5rem">
+    <select id="poolSchool"></select>
+  </div>
+  <table id="pool"><thead><tr><th>class</th><th>name</th><th>owner</th></tr></thead><tbody></tbody></table>
+</section>
+
+<div id="logCard"><section><h2>Recent activity</h2><pre class="log" id="log"></pre></section></div>
+
+<script>
+let status;
+const $ = function(id){ return document.getElementById(id); };
+function log(msg){ const e=$('log'); e.textContent = (new Date().toISOString().slice(11,19))+' '+msg+'\n'+e.textContent; }
+
+async function api(method, path, body){
+  const opts = {method: method, headers: {}};
+  if(body){ opts.headers['Content-Type']='application/json'; opts.body=JSON.stringify(body); }
+  const r = await fetch('/admin/'+path, opts);
+  if(!r.ok && r.status===401){ $('cards').innerHTML='<div class="card"><div class="lbl">Not authorized</div></div>'; throw new Error('unauthorized'); }
+  return r.json();
+}
+
+function card(lbl, num){ return '<div class="card"><div class="num">'+num+'</div><div class="lbl">'+lbl+'</div></div>'; }
+
+async function renderCards(){
+  status = await api('GET','status');
+  const c = $('cards'); c.innerHTML='';
+  c.insertAdjacentHTML('beforeend', card('users', status.users));
+  c.insertAdjacentHTML('beforeend', card('admins', status.admins));
+  c.insertAdjacentHTML('beforeend', card('pool classes', status.pool));
+  c.insertAdjacentHTML('beforeend', card('schools', status.schools));
+  c.insertAdjacentHTML('beforeend', card('tokens', status.tokens));
+  c.insertAdjacentHTML('beforeend', card('webhooks', status.webhooks));
+  c.insertAdjacentHTML('beforeend', card('ntfy topics', status.ntfyTopics));
+  c.insertAdjacentHTML('beforeend', card('recon', status.recon));
+  c.insertAdjacentHTML('beforeend', card('boosted', status.boosted));
+  c.insertAdjacentHTML('beforeend', card('editors', status.editors));
+  for(const id of ['whSchool','ntfySchool','poolSchool']) fillSchoolSelect(id);
+  $('poolSchool').addEventListener('change', loadPool);
+}
+
+function fillSchoolSelect(id){
+  const sel=$(id); sel.innerHTML='';
+  (status.schools||[]).forEach(function(s){ const o=document.createElement('option'); o.value=s.name; o.textContent=s.name; sel.appendChild(o); });
+  if(!sel.options.length){ const o=document.createElement('option'); o.value='schuldorf'; o.textContent='schuldorf'; sel.appendChild(o); }
+}
+
+async function loadUsers(){
+  const d = await api('GET','users');
+  const tb=$('users').querySelector('tbody'); tb.innerHTML='';
+  for(const u of d.users){
+    const tr=document.createElement('tr');
+    tr.innerHTML=
+      '<td>'+u.username+'</td><td>'+u.classId+' '+(u.className||'')+'</td><td>'+u.school+'</td>'+
+      '<td><button class="mini '+(u.admin?'danger':'')+'" onclick="setAdmin(\''+u.username+'\','+(!u.admin)+')">'+(u.admin?'on':'off')+'</button></td>'+
+      '<td><button class="mini '+(u.reconAllowed?'danger':'')+'" onclick="setPerm(\''+u.username+'\',\'recon\','+(!u.reconAllowed)+')">'+(u.reconAllowed?'on':'off')+'</button></td>'+
+      '<td><button class="mini '+(u.boosted?'danger':'')+'" onclick="setPerm(\''+u.username+'\',\'boosted\','+(!u.boosted)+')">'+(u.boosted?'on':'off')+'</button></td>'+
+      '<td><button class="mini '+(u.editor?'danger':'')+'" onclick="setPerm(\''+u.username+'\',\'editor\','+(!u.editor)+')">'+(u.editor?'on':'off')+'</button></td>'+
+      '<td><button class="mini danger" onclick="delUser(\''+u.username+'\')">del</button></td>';
+    tb.appendChild(tr);
+  }
+}
+
+async function addUser(){
+  const name=$('uName').value.trim(); if(!name) return;
+  await api('POST','users',{username:name, admin:true}); $('uName').value='';
+  log('promoted '+name); loadUsers(); renderCards();
+}
+async function setAdmin(u,v){ await api('POST','users/'+u,{admin:v}); loadUsers(); renderCards(); }
+async function setPerm(u,f,v){ await api('POST','users/'+u,{feature:f,allowed:v}); loadUsers(); renderCards(); }
+async function delUser(u){ if(!confirm('delete '+u+'?')) return; await api('DELETE','users/'+u); log('deleted '+u); loadUsers(); renderCards(); }
+
+async function loadSchools(){
+  const d=await api('GET','schools');
+  const tb=$('schools').querySelector('tbody'); tb.innerHTML='';
+  for(const s of d.schools){ const tr=document.createElement('tr');
+    tr.innerHTML='<td>'+s.name+'</td><td>'+new Date(s.addedAt*1000||0).toLocaleDateString()+'</td><td>'+new Date(s.lastSeen*1000||0).toLocaleString()+'</td>'; tb.appendChild(tr); }
+}
+async function addSchool(){ const n=$('sName').value.trim(); if(!n) return; await api('POST','schools/'+n); $('sName').value=''; log('registered '+n); loadSchools(); renderCards(); }
+
+async function loadWebhooks(){
+  const d=await api('GET','webhooks');
+  const tb=$('webhooks').querySelector('tbody'); tb.innerHTML='';
+  for(const w of d.webhooks){ const tr=document.createElement('tr');
+    tr.innerHTML='<td>'+w.school+'</td><td>'+w.classId+'</td><td style="word-break:break-all">'+w.url+'</td>'+
+      '<td><button class="mini danger" onclick="delWh('+w.id+')">del</button></td>'; tb.appendChild(tr); }
+}
+async function addWebhook(){
+  await api('POST','webhooks',{school:$('whSchool').value,classId:parseInt($('whClass').value)||0,url:$('whUrl').value.trim(),secret:$('whSecret').value.trim()});
+  $('whUrl').value=''; $('whSecret').value=''; log('added webhook'); loadWebhooks(); renderCards();
+}
+async function delWh(id){ await api('DELETE','webhooks/'+id); loadWebhooks(); renderCards(); }
+
+async function loadNtfy(){
+  const d=await api('GET','ntfy');
+  const tb=$('ntfy').querySelector('tbody'); tb.innerHTML='';
+  for(const n of d.topics){ const tr=document.createElement('tr');
+    tr.innerHTML='<td>'+n.school+'</td><td>'+n.classId+'</td><td>'+n.topic+'</td>'+
+      '<td><button class="mini danger" onclick="delNtfy('+n.id+')">del</button></td>'; tb.appendChild(tr); }
+}
+async function addNtfy(){
+  await api('POST','ntfy',{school:$('ntfySchool').value,classId:parseInt($('ntfyClass').value)||0,topic:$('ntfyTopic').value.trim()});
+  $('ntfyTopic').value=''; log('added ntfy topic'); loadNtfy(); renderCards();
+}
+async function delNtfy(id){ await api('DELETE','ntfy/'+id); loadNtfy(); renderCards(); }
+
+async function loadTokens(){
+  const d=await api('GET','tokens');
+  if(!d.tokens){ $('tokensSection').style.display='none'; return; }
+  $('tokensSection').style.display='';
+  const tb=$('tokens').querySelector('tbody'); tb.innerHTML='';
+  for(const t of d.tokens){ const tr=document.createElement('tr');
+    tr.innerHTML='<td style="font-family:monospace;font-size:.72rem">'+t.token+'</td><td>'+t.school+'</td><td>'+t.elementType+'</td><td>'+t.elementId+'</td><td>'+t.days+'</td>'+
+      '<td><button class="mini danger" onclick="revokeToken(\''+t.token+'\')">revoke</button></td>'; tb.appendChild(tr); }
+}
+async function revokeToken(tk){ await api('DELETE','tokens/'+tk); log('revoked '+tk); loadTokens(); }
+
+async function loadPool(){
+  const sc=$('poolSchool').value || 'schuldorf';
+  const d=await api('GET','pool/'+sc);
+  const tb=$('pool').querySelector('tbody'); tb.innerHTML='';
+  for(const c of d.pool){ const tr=document.createElement('tr');
+    tr.innerHTML='<td>'+c.id+'</td><td>'+c.name+'</td><td>'+c.owner+'</td>'; tb.appendChild(tr); }
+}
+
+(function init(){
+  renderCards().then(function(){ return Promise.all([loadUsers(),loadSchools(),loadWebhooks(),loadNtfy(),loadTokens(),loadPool()]); })
+    .catch(function(e){ log('init failed: '+e); });
+})();
+</script>
+</body>
+</html>

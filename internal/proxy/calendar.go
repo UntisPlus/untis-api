@@ -126,7 +126,7 @@ func (p *Proxy) handleCalendarToken(w http.ResponseWriter, r *http.Request) {
 
 	// ── class ──
 	if req.ClassID > 0 {
-		ok, err := p.store.PoolContains(req.ClassID)
+		ok, err := p.store.PoolContains(school, req.ClassID)
 		if err != nil || !ok {
 			p.forbidden(w)
 			return
@@ -215,16 +215,16 @@ func (p *Proxy) writeCalendarResponse(w http.ResponseWriter, r *http.Request, to
 		name = elementName(md, "SUBJECT", tok.ElementID)
 	}
 	resp := map[string]any{
-		"type":      strings.ToLower(tok.ElementType),
-		"id":        tok.ElementID,
-		"name":      name,
-		"token":     tok.Token,
-		"url":       p.calendarURL(r, tok.Token),
-		"timezone":  tok.Timezone,
-		"days":      tok.Days,
-		"horizon":   time.Now().AddDate(0, 0, tok.Days).Format("2006-01-02"),
-		"created":   tok.CreatedAt,
-		"lastUsed":  tok.LastAccess,
+		"type":     strings.ToLower(tok.ElementType),
+		"id":       tok.ElementID,
+		"name":     name,
+		"token":    tok.Token,
+		"url":      p.calendarURL(r, tok.Token),
+		"timezone": tok.Timezone,
+		"days":     tok.Days,
+		"horizon":  time.Now().AddDate(0, 0, tok.Days).Format("2006-01-02"),
+		"created":  tok.CreatedAt,
+		"lastUsed": tok.LastAccess,
 	}
 	if tok.ClassID > 0 {
 		resp["classId"] = tok.ClassID

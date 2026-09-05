@@ -46,18 +46,18 @@ func (p *Proxy) getTimetable(w http.ResponseWriter, r *http.Request, school stri
 	}
 
 	// Class timetables: access is granted for the class pool only.
-	ok, err := p.store.PoolContains(elID)
+	ok, err := p.store.PoolContains(school, elID)
 	if err != nil || !ok {
 		p.writeJSONRPCError(w, id, "no right for timetable", -8509)
 		return
 	}
-	owner, err := p.store.OwnerForClass(elID)
+	owner, err := p.store.OwnerForClass(school, elID)
 	if err != nil || owner == nil {
 		p.writeJSONRPCError(w, id, "no right for timetable", -8509)
 		return
 	}
 
-	key := fmt.Sprintf("%d|%s|%s", elID, params.Options.StartDate, params.Options.EndDate)
+	key := fmt.Sprintf("%s|%d|%s|%s", school, elID, params.Options.StartDate, params.Options.EndDate)
 	if b, ok := p.tt.Get(key); ok {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(b)

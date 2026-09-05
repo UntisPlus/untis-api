@@ -107,7 +107,7 @@ func (p *Proxy) fetchClassChunkFresh(school string, classID int64, start, end st
 }
 
 func (p *Proxy) fetchClassChunkMode(school string, classID int64, start, end string, fresh bool) ([]map[string]any, error) {
-	key := fmt.Sprintf("recon|%d|%s|%s", classID, start, end)
+	key := fmt.Sprintf("recon|%s|%d|%s|%s", school, classID, start, end)
 	if !fresh {
 		if v, ok := p.tt.Get(key); ok {
 			var out []map[string]any
@@ -116,7 +116,7 @@ func (p *Proxy) fetchClassChunkMode(school string, classID int64, start, end str
 			}
 		}
 	}
-	owner, err := p.store.OwnerForClass(classID)
+	owner, err := p.store.OwnerForClass(school, classID)
 	if err != nil || owner == nil {
 		return nil, fmt.Errorf("no owner for class %d", classID)
 	}
@@ -269,7 +269,7 @@ func (p *Proxy) studentPeriods(school string, personID int64, start, end string)
 
 // fetchStudentChunk fetches one chunk of a student's personal timetable.
 func (p *Proxy) fetchStudentChunk(school string, u *store.User, personID int64, start, end string) ([]map[string]any, error) {
-	key := fmt.Sprintf("student|%d|%s|%s", personID, start, end)
+	key := fmt.Sprintf("student|%s|%d|%s|%s", school, personID, start, end)
 	if v, ok := p.tt.Get(key); ok {
 		var out []map[string]any
 		if err := json.Unmarshal(v, &out); err == nil {
@@ -342,7 +342,7 @@ func periodElementIDs(pd map[string]any) []struct {
 // merging the pooled classes' timetables over the range. Periods are deduped by
 // (start, end, subject) so a teacher teaching two classes at once appears once.
 func (p *Proxy) elementPeriods(school, elType string, elID int64, start, end string) ([]map[string]any, error) {
-	classes, err := p.store.Pool()
+	classes, err := p.store.Pool(school)
 	if err != nil {
 		return nil, err
 	}
@@ -388,7 +388,7 @@ func (p *Proxy) elementPeriods(school, elType string, elID int64, start, end str
 // upstream periods (no reconstruction, no caching) — the same data a boosted
 // user sees in the app.
 func (p *Proxy) fetchElementRaw(school, elType string, elID int64, start, end string) ([]map[string]any, error) {
-	owner := p.boostedSource()
+	owner := p.boostedSource(school)
 	if owner == nil {
 		return nil, fmt.Errorf("no boosted source account available")
 	}
@@ -457,30 +457,32 @@ func (p *Proxy) scanClass(school string, classID int64, yearStart, yearEnd strin
 			for _, el := range periodElementIDs(pd) {
 				switch el.Type {
 				case "TEACHER":
-					p.recon.mu.Lock()
-					p.recon.teachers[el.ID] = true
-					p.recon.mu.Unlock()
+					p.stateFor(school).recon.mu.Lock()
+					p.stateFor(school).recon.teachers[el.ID] = true
+					p.stateFor(school).recon.mu.Unlock()
 				case "ROOM":
-					p.recon.mu.Lock()
-					p.recon.rooms[el.ID] = true
-					p.recon.mu.Unlock()
+					p.stateFor(school).recon.mu.Lock()
+					p.stateFor(school).recon.rooms[el.ID] = true
+					p.stateFor(school).recon.mu.Unlock()
 				case "SUBJECT":
-					p.recon.mu.Lock()
-					p.recon.subjects[el.ID] = true
-					p.recon.mu.Unlock()
+					p.stateFor(school).recon.mu.Lock()
+					p.stateFor(school).recon.subjects[el.ID] = true
+					p.stateFor(school).recon.mu.Unlock()
 				}
 			}
 		}
 	}
-	p.recon.mu.Lock()
-	p.recon.scanUntil[classID] = horizon
-	p.recon.mu.Unlock()
+	p.stateFor(school).recon.mu.Lock()
+	p.stateFor(school).recon.scanUntil[classID] = horizon
+	p.stateFor(school).recon.mu.Unlock()
 	_ = p.store.SaveReconScanAt(school, classID, horizon)
 }
 
 // StartRecon kicks off background enumeration of known teachers/rooms/subjects
 // across all pooled classes.
-func (p *Proxy) StartRecon(school, yearStart, yearEnd string) {	classes, err := p.store.Pool()
+func (p *Proxy) StartRecon(school, yearStart, yearEnd string) {
+	p.stateFor(school)
+	classes, err := p.store.Pool(school)
 	if err != nil {
 		log.Printf("[recon] no pool: %v", err)
 		return
@@ -495,7 +497,7 @@ func (p *Proxy) StartRecon(school, yearStart, yearEnd string) {	classes, err := 
 			p.scanClass(school, c.ID, yearStart, yearEnd)
 		}
 		log.Printf("[recon] enumeration done: %d teachers, %d rooms, %d subjects",
-			len(p.recon.teachers), len(p.recon.rooms), len(p.recon.subjects))
+			len(p.stateFor(school).recon.teachers), len(p.stateFor(school).recon.rooms), len(p.stateFor(school).recon.subjects))
 	}()
 }
 
@@ -503,20 +505,20 @@ func (p *Proxy) StartRecon(school, yearStart, yearEnd string) {	classes, err := 
 // answered immediately on boot, before the background scan finishes. The scan
 // then re-runs and refreshes the fresh state. It is only ever a warm start and
 // not served as a replacement for fresh data.
-func (p *Proxy) LoadRecon() {
-	elems, err := p.store.LoadReconElements()
+func (p *Proxy) LoadRecon(school string) {
+	elems, err := p.store.LoadReconElements(school)
 	if err != nil || len(elems) == 0 {
 		return
 	}
-	p.recon.seedFrom(elems)
-	log.Printf("[recon] restored snapshot: %d teachers, %d rooms, %d subjects",
-		len(elems["TEACHER"]), len(elems["ROOM"]), len(elems["SUBJECT"]))
+	p.stateFor(school).recon.seedFrom(elems)
+	log.Printf("[recon] restored snapshot (%s): %d teachers, %d rooms, %d subjects",
+		school, len(elems["TEACHER"]), len(elems["ROOM"]), len(elems["SUBJECT"]))
 }
 
 // PersistRecon writes the current recon element set (and per-class scan
 // progress) to persistent storage. Call on graceful shutdown.
-func (p *Proxy) PersistRecon() {
-	if err := p.store.SaveReconElements(p.recon.snapshot()); err != nil {
+func (p *Proxy) PersistRecon(school string) {
+	if err := p.store.SaveReconElements(school, p.stateFor(school).recon.snapshot()); err != nil {
 		log.Printf("[recon] persist snapshot: %v", err)
 		return
 	}

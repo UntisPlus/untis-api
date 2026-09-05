@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -159,7 +158,7 @@ func (p *Proxy) restWeeklyTimetable(w http.ResponseWriter, r *http.Request, scho
 // serveRESTRawFromBoostedSource serves the weekly timetable REST endpoint raw
 // from the saved teacher accounts when the requester is boosted.
 func (p *Proxy) serveRESTRawFromBoostedSource(w http.ResponseWriter, r *http.Request, school string) bool {
-	sources, err := p.store.BoostedSourceAccounts()
+	sources, err := p.store.BoostedSourceAccounts(school)
 	if err != nil || len(sources) == 0 {
 		return false
 	}
@@ -181,11 +180,11 @@ func (p *Proxy) serveRESTRawFromBoostedSource(w http.ResponseWriter, r *http.Req
 }
 
 func (p *Proxy) restPoolOwner(school string, classID int64) (*store.User, error) {
-	ok, err := p.store.PoolContains(classID)
+	ok, err := p.store.PoolContains(school, classID)
 	if err != nil || !ok {
 		return nil, fmt.Errorf("class not pooled")
 	}
-	owner, err := p.store.OwnerForClass(classID)
+	owner, err := p.store.OwnerForClass(school, classID)
 	if err != nil || owner == nil {
 		return nil, fmt.Errorf("no owner")
 	}
@@ -196,7 +195,7 @@ func (p *Proxy) restPoolOwner(school string, classID int64) (*store.User, error)
 // teacher/subject/room by reconstructing the week from pooled class data.
 func (p *Proxy) restWeeklyElement(w http.ResponseWriter, r *http.Request, school, elType string, elID int64, date string) {
 	typeName := map[string]string{"2": "TEACHER", "3": "SUBJECT", "4": "ROOM"}[elType]
-	if !p.recon.has(typeName, elID) {
+	if !p.stateFor(school).recon.has(typeName, elID) {
 		p.forbidden(w)
 		return
 	}
@@ -319,14 +318,4 @@ func elementLongName(md *masterDataCache, t string, id int64) string {
 		return ""
 	}
 	return md.subjects[id]
-}
-
-func (p *Proxy) forbidden(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusForbidden)
-	b, _ := json.Marshal(map[string]string{
-		"errorCode":    "FORBIDDEN",
-		"errorMessage": "no right",
-	})
-	_, _ = w.Write(b)
 }

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,6 +29,7 @@ func main() {
 	env := flag.String("env", "", "deployment mode (dev|beta|prod); defaults to UNTIS_ENV, else dev")
 	version := flag.String("version", "dev", "reported build version")
 	poll := flag.Duration("poll-interval", 60*time.Second, "timetable change-detection poll interval")
+	admin := flag.String("admin", "", "comma-separated usernames to bootstrap as admins (once)")
 	flag.Parse()
 
 	if *env != "" {
@@ -49,12 +51,36 @@ func main() {
 	if err != nil {
 		log.Fatalf("store: %v", err)
 	}
+	if err := st.SetDefaultSchool(*school); err != nil {
+		log.Printf("backfill users school: %v", err)
+	}
+
+	// Seed the -admin flag list once; the marked usernames hold the admin flag
+	// in the DB afterwards and can be demoted/promoted via the /admin API or
+	// untisctl without -admin re-applying on restart.
+	if *admin != "" {
+		seeded, err := st.AdminBootstrapSeeded()
+		if err == nil && !seeded {
+			for _, name := range strings.Split(*admin, ",") {
+				name = strings.TrimSpace(name)
+				if name == "" {
+					continue
+				}
+				if err := st.SetAdmin(name, true); err != nil {
+					log.Printf("seed admin %q: %v", name, err)
+					continue
+				}
+				log.Printf("seeded admin: %s", name)
+			}
+			_ = st.MarkAdminBootstrapSeeded()
+		}
+	}
 
 	uc := untis.New(untis.Config{Server: *server, School: *school})
 	sm := session.NewManager(24 * time.Hour)
 
 	p := proxy.New(st, uc, sm, proxy.Options{School: *school, TTL: *ttl})
-	p.LoadRecon()
+	p.LoadRecon(*school)
 	p.StartRecon(*school, ys, ye)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -82,7 +108,7 @@ func main() {
 	}
 
 	close(pollDone)
-	p.PersistRecon()
+	p.PersistRecon(*school)
 	if err := st.Close(); err != nil {
 		log.Printf("close store: %v", err)
 	}

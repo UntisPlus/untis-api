@@ -40,6 +40,7 @@ Commands:
   users list                         list accounts
   users add --user U --secret S [--method password|key]
   users remove --user U              delete user + secret + overrides + personal tokens
+  users admin --user U [--on|--off]  grant or revoke admin dashboard access
   users check [--remove-classless]   ask the real Untis API for each account's class;
                                      --remove-classless deletes students the API
                                      reports without a class
@@ -89,11 +90,11 @@ Run 'untisctl <command> -h' for per-command flags.
 	case "users":
 		cmdUsers(st, flag.Args()[1:], *server, *school)
 	case "pool":
-		cmdPool(st, flag.Args()[1:])
+		cmdPool(st, flag.Args()[1:], *school)
 	case "calendar", "tokens":
 		cmdCalendar(st, flag.Args()[1:])
 	case "status":
-		cmdStatus(st)
+		cmdStatus(st, *school)
 	default:
 		fatal("unknown command %q\n\nrun 'untisctl -h' for usage", flag.Arg(0))
 	}
@@ -274,6 +275,8 @@ func cmdUsers(st *store.Store, args []string, server, school string) {
 		userAdd(st, args[1:])
 	case "remove":
 		userRemove(st, args[1:])
+	case "admin":
+		userAdmin(st, args[1:])
 	case "check":
 		userCheck(st, server, school, args[1:])
 	default:
@@ -318,6 +321,20 @@ func userAdd(st *store.Store, args []string) {
 		}
 	}
 	fmt.Printf("added user %q (method=%s)\n", *user, *method)
+}
+
+func userAdmin(st *store.Store, args []string) {
+	fs := flag.NewFlagSet("users admin", flag.ExitOnError)
+	user := fs.String("user", "", "username")
+	on := fs.Bool("on", true, "grant admin (or --off to revoke)")
+	fs.Parse(args)
+	if *user == "" {
+		fatal("users admin requires --user")
+	}
+	if err := st.SetAdmin(*user, *on); err != nil {
+		fatal("set admin: %v", err)
+	}
+	fmt.Printf("user %q admin=%v\n", *user, *on)
 }
 
 func userRemove(st *store.Store, args []string) {
@@ -420,24 +437,24 @@ func userCheck(st *store.Store, server, school string, args []string) {
 // pool
 // ---------------------------------------------------------------------------
 
-func cmdPool(st *store.Store, args []string) {
+func cmdPool(st *store.Store, args []string, school string) {
 	if len(args) == 0 {
-		poolList(st)
+		poolList(st, school)
 		return
 	}
 	switch args[0] {
 	case "list":
-		poolList(st)
+		poolList(st, school)
 	case "owners":
 		// list already shows owners; no distinct owners view needed
-		poolList(st)
+		poolList(st, school)
 	default:
 		fatal("unknown pool subcommand %q", args[0])
 	}
 }
 
-func poolList(st *store.Store) {
-	classes, err := st.Pool()
+func poolList(st *store.Store, school string) {
+	classes, err := st.Pool(school)
 	if err != nil {
 		fatal("pool list: %v", err)
 	}
@@ -447,7 +464,7 @@ func poolList(st *store.Store) {
 	}
 	fmt.Printf("%-8s %-20s %s\n", "CLASS", "NAME", "OWNER")
 	for _, c := range classes {
-		owner, _ := st.OwnerForClass(c.ID)
+		owner, _ := st.OwnerForClass(school, c.ID)
 		ownerName := "-"
 		if owner != nil {
 			ownerName = owner.Username
@@ -551,28 +568,28 @@ Examples:
 		elType = "CLASS"
 		elID = *classID
 		// Validate class is in pool
-		ok, err := st.PoolContains(elID)
+		ok, err := st.PoolContains(*school, elID)
 		if err != nil || !ok {
 			fatal("class %d is not in the pool", elID)
 		}
 	case *teacher != "":
 		elType = "TEACHER"
 		var err error
-		elID, err = st.LookupElement("TEACHER", *teacher)
+		elID, err = st.LookupElement(*school, "TEACHER", *teacher)
 		if err != nil {
 			fatal("teacher lookup: %v", err)
 		}
 	case *room != "":
 		elType = "ROOM"
 		var err error
-		elID, err = st.LookupElement("ROOM", *room)
+		elID, err = st.LookupElement(*school, "ROOM", *room)
 		if err != nil {
 			fatal("room lookup: %v", err)
 		}
 	case *subject != "":
 		elType = "SUBJECT"
 		var err error
-		elID, err = st.LookupElement("SUBJECT", *subject)
+		elID, err = st.LookupElement(*school, "SUBJECT", *subject)
 		if err != nil {
 			fatal("subject lookup: %v", err)
 		}
@@ -694,12 +711,12 @@ func generateToken() string {
 // status
 // ---------------------------------------------------------------------------
 
-func cmdStatus(st *store.Store) {
+func cmdStatus(st *store.Store, school string) {
 	uc, _ := st.UserCount()
-	pool, _ := st.Pool()
+	pool, _ := st.Pool(school)
 	rows, _ := st.AllPerms()
 	tokens, _ := st.ListClassTokens()
-	recon, _ := st.LoadReconElements()
+	recon, _ := st.LoadReconElements(school)
 
 	var permCount int
 	var globalCount, overrideCount int

@@ -89,6 +89,7 @@ func (p *Proxy) authenticate(w http.ResponseWriter, r *http.Request, school stri
 		Username:    params.User,
 		Password:    params.Password,
 		Method:      "password",
+		School:      school,
 		PersonID:    info.PersonID,
 		PersonType:  info.PersonType,
 		ClassID:     donateClassID,
@@ -98,6 +99,10 @@ func (p *Proxy) authenticate(w http.ResponseWriter, r *http.Request, school stri
 	}
 	_ = p.store.UpsertUser(user)
 	_ = p.store.Touch(params.User)
+	p.stateFor(school)
+	if p.isNewSchool(school) {
+		p.ensureReconScan(school)
+	}
 	go p.untis.Logout(school, cookie)
 
 	s := p.sessions.New(params.User, info.ClassID)

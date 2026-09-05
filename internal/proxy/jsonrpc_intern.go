@@ -254,6 +254,7 @@ func (p *Proxy) keyLogin(w http.ResponseWriter, r *http.Request, school string, 
 		Username:    auth.User,
 		Password:    replayKey,
 		Method:      "key",
+		School:      school,
 		PersonID:    info.PersonID,
 		PersonType:  info.PersonType,
 		ClassID:     donateClassID,
@@ -266,12 +267,16 @@ func (p *Proxy) keyLogin(w http.ResponseWriter, r *http.Request, school string, 
 	if !isAnon {
 		_ = p.store.UpsertUser(user)
 		_ = p.store.Touch(auth.User)
+		p.stateFor(school)
+		if p.isNewSchool(school) {
+			p.ensureReconScan(school)
+		}
 	}
 	go p.untis.Logout(school, cookie)
 
 	s := p.sessions.New(auth.User, info.ClassID)
 	p.setSessionCookies(w, s.ID, school)
-	rewritten := p.markPooledElementsDisplayable(realBody, auth.User)
+	rewritten := p.markPooledElementsDisplayable(school, realBody, auth.User)
 	p.mdJSONMu.Lock()
 	p.mdJSON = rewritten
 	p.mdJSONMu.Unlock()
@@ -284,7 +289,7 @@ func (p *Proxy) keyLogin(w http.ResponseWriter, r *http.Request, school string, 
 // subjects the requesting user is allowed to reconstruct are displayAllowed.
 // Element reconstruction access is granted per type (TEACHER/ROOM/SUBJECT) via
 // a per-user override or the global switch; un-granted types stay hidden.
-func (p *Proxy) markPooledElementsDisplayable(body []byte, username string) []byte {
+func (p *Proxy) markPooledElementsDisplayable(school string, body []byte, username string) []byte {
 	var resp struct {
 		Result struct {
 			MasterData struct {
@@ -316,7 +321,7 @@ func (p *Proxy) markPooledElementsDisplayable(body []byte, username string) []by
 	}
 	pooled := map[int64]bool{}
 	for _, k := range resp.Result.MasterData.Klassen {
-		ok, err := p.store.PoolContains(k.ID)
+		ok, err := p.store.PoolContains(school, k.ID)
 		if err == nil && ok {
 			pooled[k.ID] = true
 		}
@@ -374,13 +379,13 @@ func (p *Proxy) markPooledElementsDisplayable(body []byte, username string) []by
 	// Everyone (Basic and Recon alike) can at least see the pooled classes.
 	setDisplayable("klassen", func(id int64) bool { return pooled[id] }, "displayable")
 	setDisplayable("teachers", func(id int64) bool {
-		return can && p.recon.has("TEACHER", id)
+		return can && p.stateFor(school).recon.has("TEACHER", id)
 	}, "displayAllowed")
 	setDisplayable("rooms", func(id int64) bool {
-		return can && p.recon.has("ROOM", id)
+		return can && p.stateFor(school).recon.has("ROOM", id)
 	}, "displayAllowed")
 	setDisplayable("subjects", func(id int64) bool {
-		return can && p.recon.has("SUBJECT", id)
+		return can && p.stateFor(school).recon.has("SUBJECT", id)
 	}, "displayAllowed")
 
 	out, err := json.Marshal(m)
@@ -487,12 +492,12 @@ func (p *Proxy) getTimetable2017(w http.ResponseWriter, r *http.Request, school 
 		p.writeJSONRPCError(w, id, "no right for timetable", -8509)
 		return
 	}
-	ok, err := p.store.PoolContains(classID)
+	ok, err := p.store.PoolContains(school, classID)
 	if err != nil || !ok {
 		p.writeJSONRPCError(w, id, "no right for timetable", -8509)
 		return
 	}
-	owner, err := p.store.OwnerForClass(classID)
+	owner, err := p.store.OwnerForClass(school, classID)
 	if err != nil || owner == nil {
 		p.writeJSONRPCError(w, id, "no right for timetable", -8509)
 		return
@@ -530,7 +535,7 @@ func (p *Proxy) getTimetable2017(w http.ResponseWriter, r *http.Request, school 
 // boosted. It picks the first available teacher source account and forwards the
 // request with rewritten auth to that account.
 func (p *Proxy) serveRawFromBoostedSource(w http.ResponseWriter, r *http.Request, school string, id json.RawMessage, body []byte) bool {
-	owner := p.boostedSource()
+	owner := p.boostedSource(school)
 	if owner == nil {
 		return false
 	}
@@ -552,8 +557,8 @@ func (p *Proxy) serveRawFromBoostedSource(w http.ResponseWriter, r *http.Request
 
 // boostedSource returns the most recently active saved teacher account
 // (non-student with a replayable credential), or nil if none is available.
-func (p *Proxy) boostedSource() *store.User {
-	sources, err := p.store.BoostedSourceAccounts()
+func (p *Proxy) boostedSource(school string) *store.User {
+	sources, err := p.store.BoostedSourceAccounts(school)
 	if err != nil || len(sources) == 0 {
 		return nil
 	}
@@ -617,7 +622,7 @@ func (p *Proxy) serveElementTimetable(w http.ResponseWriter, r *http.Request, sc
 		p.writeJSONRPCError(w, id, "no right for timetable", -8509)
 		return
 	}
-	if !p.recon.has(pr.Type, pr.ID) {
+	if !p.stateFor(school).recon.has(pr.Type, pr.ID) {
 		p.writeJSONRPCError(w, id, "no right for timetable", -8509)
 		return
 	}

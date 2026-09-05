@@ -40,12 +40,39 @@ Flags (all also available as `UNTIS_*` env vars):
 | `-version` | `dev` | reported build version |
 | `-ttl` | `5m` | timetable cache TTL |
 | `-poll-interval` | `60s` | how often the change-detector polls each class |
+| `-admin` | — | comma-separated usernames bootstrapped as admins once |
 | `-year-start` / `-year-end` | auto | school-year bounds |
 
 The upstream host for a school is **auto-resolved** via WebUntis'
 `searchSchool` API, so `-server` is only a fallback. The **school name** is the
 identifier for sessions, the class pool, recon, perms and calendar tokens, so
 keep it consistent with the database you migrated.
+
+The proxy is **multi-school**: the first login from a school it has never seen
+auto-registers that school (own pool, recon, caches, change polling) with no
+restart. Clients pick the school with `?school=` on the login request.
+
+---
+
+## Admin dashboard, webhooks & push notifications
+
+- **Admin dashboard** — embedded single-page UI at `/admin`, gated by an admin
+  session (`users.admin` flag). Grants full DB/untisctl capability: users,
+  perms, pool, tokens, schools, webhooks, ntfy topics, recon. Bootstrap the
+  first admin with `untisctl users admin --user X` (or `-admin X` at boot).
+- **Webhooks** — on every detected timetable change, JSON is POSTed to
+  configured URLs (school-wide or per-class) with an optional HMAC-SHA256
+  `X-Untis-Signature` and a human `X-Untis-Summary` header.
+- **ntfy push** — change events are fanned out to `ntfy.sh/{topic}` for
+  school-wide and per-class topics; the Android app subscribes and reconciles
+  via `/api/timetable/changes`.
+
+Admins configure everything via the dashboard or `POST /admin/*`. Users can
+self-service their **own** class subscriptions at `/api/webhooks` and
+`/api/ntfy` (school-wide / other classes require editor/boosted/admin).
+
+See [`docs/ADMIN-WEBHOOKS-NTFY.md`](docs/ADMIN-WEBHOOKS-NTFY.md) for the full
+API reference.
 
 ---
 
@@ -55,7 +82,7 @@ keep it consistent with the database you migrated.
 
 ```
 GET /status
-{"mode":"prod","status":"ok","uptime_sec":6,"version":"v1.2.0"}
+{"mode":"prod","status":"ok","uptime_sec":6,"version":"v1.4.0"}
 ```
 
 **Calendar subscriptions** (token-based, stable)
@@ -156,6 +183,7 @@ flags are set from the user's effective access).
 untisctl users list
 untisctl users add --user Linoth --secret <base32-key> --method key
 untisctl users add --user X --secret <password> --method password
+untisctl users admin --user evan        # grant admin (or --off to revoke)
 untisctl users remove --user Linoth   # also removes secret, perms, personal tokens
 ```
 
@@ -226,7 +254,7 @@ services:
     environment:
       UNTIS_ADDR: ":8509"
       UNTIS_ENV: "prod"
-      UNTIS_VERSION: "v1.2.0"
+      UNTIS_VERSION: "v1.4.0"
       UNTIS_POLL_INTERVAL: "60s"
     volumes:
       - ./data:/data
@@ -287,9 +315,9 @@ labels themselves). To move it to the NAS:
 ## Adding / rebuilding the Docker image
 
 ```sh
-docker build -t datpersothere/untis-proxy:latest -t datpersothere/untis-proxy:v1.2.0 .
+docker build -t datpersothere/untis-proxy:latest -t datpersothere/untis-proxy:v1.4.0 .
 docker push datpersothere/untis-proxy:latest
-docker push datpersothere/untis-proxy:v1.2.0
+docker push datpersothere/untis-proxy:v1.4.0
 ```
 
 ---

@@ -16,6 +16,9 @@ func norm(username string) string {
 	return strings.ToLower(strings.TrimSpace(username))
 }
 
+// userCols lists the users table columns in scan order (scanUser/scanUserRow).
+const userCols = "id,username,password,method,person_id,person_type,class_id,class_name,email,display_name,created_at,last_seen,school,admin"
+
 type User struct {
 	ID          int64
 	Username    string
@@ -27,6 +30,8 @@ type User struct {
 	ClassName   string
 	Email       string
 	DisplayName string
+	School      string
+	Admin       bool
 	CreatedAt   time.Time
 	LastSeen    time.Time
 }
@@ -39,16 +44,16 @@ type Class struct {
 // ClassToken binds an opaque calendar subscription token to a school and
 // either a class (ClassID > 0) or a personal student timetable (PersonID > 0).
 type ClassToken struct {
-	Token      string
-	School     string
-	ClassID    int64
-	PersonID   int64
+	Token       string
+	School      string
+	ClassID     int64
+	PersonID    int64
 	ElementType string
 	ElementID   int64
 	Timezone    string
-	Days       int
-	CreatedAt  int64
-	LastAccess int64
+	Days        int
+	CreatedAt   int64
+	LastAccess  int64
 }
 
 type Store struct {
@@ -73,7 +78,9 @@ func Open(path string) (*Store, error) {
 		email TEXT NOT NULL DEFAULT '',
 		display_name TEXT NOT NULL DEFAULT '',
 		created_at INTEGER NOT NULL DEFAULT 0,
-		last_seen INTEGER NOT NULL DEFAULT 0
+		last_seen INTEGER NOT NULL DEFAULT 0,
+		school TEXT NOT NULL DEFAULT '',
+		admin INTEGER NOT NULL DEFAULT 0
 	)`)
 	if err != nil {
 		return nil, err
@@ -108,6 +115,46 @@ func Open(path string) (*Store, error) {
 		class_id INTEGER NOT NULL,
 		scan_until TEXT NOT NULL,
 		PRIMARY KEY (school, class_id)
+	)`)
+	if err != nil {
+		return nil, err
+	}
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS schools (
+		school TEXT NOT NULL PRIMARY KEY,
+		added_at INTEGER NOT NULL DEFAULT 0,
+		last_seen INTEGER NOT NULL DEFAULT 0
+	)`)
+	if err != nil {
+		return nil, err
+	}
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS settings (
+		key TEXT NOT NULL PRIMARY KEY,
+		value TEXT NOT NULL DEFAULT ''
+	)`)
+	if err != nil {
+		return nil, err
+	}
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS webhooks (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		school TEXT NOT NULL DEFAULT '',
+		class_id INTEGER NOT NULL DEFAULT 0,
+		url TEXT NOT NULL,
+		secret TEXT NOT NULL DEFAULT '',
+		enabled INTEGER NOT NULL DEFAULT 1,
+		created_by TEXT NOT NULL DEFAULT '',
+		created_at INTEGER NOT NULL DEFAULT 0
+	)`)
+	if err != nil {
+		return nil, err
+	}
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS ntfy_topics (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		school TEXT NOT NULL DEFAULT '',
+		class_id INTEGER NOT NULL DEFAULT 0,
+		topic TEXT NOT NULL,
+		enabled INTEGER NOT NULL DEFAULT 1,
+		created_by TEXT NOT NULL DEFAULT '',
+		created_at INTEGER NOT NULL DEFAULT 0
 	)`)
 	if err != nil {
 		return nil, err
@@ -166,8 +213,20 @@ func Open(path string) (*Store, error) {
 	if err := addColumnIfMissing(db, "recon_elements", "name", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
+	// migration: add school column to recon_elements for per-school element sets
+	if err := addColumnIfMissing(db, "recon_elements", "school", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
 	// migration: add days column to class_tokens for configurable lookahead
 	if err := addColumnIfMissing(db, "class_tokens", "days", "INTEGER NOT NULL DEFAULT 30"); err != nil {
+		return nil, err
+	}
+	// migration: add school column to users for multi-school support
+	if err := addColumnIfMissing(db, "users", "school", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
+	// migration: add admin flag column to users
+	if err := addColumnIfMissing(db, "users", "admin", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return nil, err
 	}
 	// backfill: set element_type/element_id on existing tokens
@@ -407,6 +466,9 @@ func (s *Store) GetSecret(username string) (string, error) {
 // for a reconstruction element type. Per-user rows override it.
 const globalPermUser = "*"
 
+// GlobalPermUser exposes the global-switch perms username to other packages.
+func GlobalPermUser() string { return globalPermUser }
+
 // Permission feature names.
 const (
 	// FeatureRecon grants reconstruction of teacher/room/subject timetables
@@ -555,6 +617,220 @@ func (s *Store) RevokeAll() (int64, error) {
 	return n, nil
 }
 
+// maxAdminBootstrapKey keys the settings row remembering which usernames were
+// seeded as admins from the -admin flag, so a later demotion via the API is not
+// silently re-applied on restart.
+const adminBootstrapKey = "admin_bootstrap"
+
+// IsAdmin reports whether a user holds the admin flag (DB `admin` column).
+func (s *Store) IsAdmin(username string) (bool, error) {
+	u, err := s.GetUser(username)
+	if err != nil || u == nil {
+		return false, err
+	}
+	return u.Admin, nil
+}
+
+// SetAdmin sets the admin flag for a user, creating the row if it does not
+// exist yet.
+func (s *Store) SetAdmin(username string, admin bool) error {
+	username = norm(username)
+	u, err := s.GetUser(username)
+	if err != nil {
+		return err
+	}
+	if u == nil {
+		u = &User{Username: username}
+	}
+	u.Admin = admin
+	return s.UpsertUser(u)
+}
+
+// AdminBootstrapSeeded reports whether the -admin bootstrap list has already
+// been applied for the given usernames.
+func (s *Store) AdminBootstrapSeeded() (bool, error) {
+	var v string
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key=?`, adminBootstrapKey).Scan(&v)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil && v != "", err
+}
+
+// MarkAdminBootstrapSeeded records that the -admin flag list has been applied.
+func (s *Store) MarkAdminBootstrapSeeded() error {
+	_, err := s.db.Exec(`INSERT INTO settings (key, value) VALUES (?, '1')
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, adminBootstrapKey)
+	return err
+}
+
+// School is one registered upstream Untis school.
+type School struct {
+	Name     string
+	AddedAt  time.Time
+	LastSeen time.Time
+}
+
+// ListSchools returns every registered school, most recently seen first.
+func (s *Store) ListSchools() ([]*School, error) {
+	rows, err := s.db.Query(`SELECT school, added_at, last_seen FROM schools ORDER BY last_seen DESC, school`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*School
+	for rows.Next() {
+		var sc School
+		var a, ls int64
+		if err := rows.Scan(&sc.Name, &a, &ls); err != nil {
+			return nil, err
+		}
+		sc.AddedAt, sc.LastSeen = time.Unix(a, 0), time.Unix(ls, 0)
+		out = append(out, &sc)
+	}
+	return out, rows.Err()
+}
+
+// KnownSchool reports whether a school is already registered.
+func (s *Store) KnownSchool(school string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM schools WHERE school=?`, school).Scan(&n)
+	return n > 0, err
+}
+
+// UpsertSchool registers (or bumps last_seen for) a school.
+func (s *Store) UpsertSchool(school string) error {
+	_, err := s.db.Exec(`INSERT INTO schools (school, added_at, last_seen) VALUES (?,?,?)
+		ON CONFLICT(school) DO UPDATE SET last_seen=excluded.last_seen`,
+		school, time.Now().Unix(), time.Now().Unix())
+	return err
+}
+
+// Webhook is a change-delivery webhook subscription.
+type Webhook struct {
+	ID        int64
+	School    string
+	ClassID   int64 // 0 = all classes in the school
+	URL       string
+	Secret    string
+	Enabled   bool
+	CreatedBy string
+	CreatedAt time.Time
+}
+
+// AddWebhook registers a webhook subscription.
+func (s *Store) AddWebhook(w *Webhook) (int64, error) {
+	en := 0
+	if w.Enabled {
+		en = 1
+	}
+	res, err := s.db.Exec(`INSERT INTO webhooks (school, class_id, url, secret, enabled, created_by, created_at)
+		VALUES (?,?,?,?,?,?,?)`,
+		w.School, w.ClassID, w.URL, w.Secret, en, w.CreatedBy, time.Now().Unix())
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// ListWebhooks returns webhook subscriptions for a school (or all when school is "").
+func (s *Store) ListWebhooks(school string) ([]*Webhook, error) {
+	q := `SELECT id, school, class_id, url, secret, enabled, created_by, created_at FROM webhooks`
+	var args []any
+	if school != "" {
+		q += ` WHERE school=?`
+		args = append(args, school)
+	}
+	q += ` ORDER BY id`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Webhook
+	for rows.Next() {
+		var w Webhook
+		var en, ca int64
+		if err := rows.Scan(&w.ID, &w.School, &w.ClassID, &w.URL, &w.Secret, &en, &w.CreatedBy, &ca); err != nil {
+			return nil, err
+		}
+		w.Enabled, w.CreatedAt = en != 0, time.Unix(ca, 0)
+		out = append(out, &w)
+	}
+	return out, rows.Err()
+}
+
+// DeleteWebhook removes a webhook subscription by id.
+func (s *Store) DeleteWebhook(id int64) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM webhooks WHERE id=?`, id)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// NtfyTopic is a configured ntfy push topic subscription.
+type NtfyTopic struct {
+	ID        int64
+	School    string
+	ClassID   int64 // 0 = all classes in the school
+	Topic     string
+	Enabled   bool
+	CreatedBy string
+	CreatedAt time.Time
+}
+
+// AddNtfyTopic registers an ntfy topic subscription.
+func (s *Store) AddNtfyTopic(n *NtfyTopic) (int64, error) {
+	en := 0
+	if n.Enabled {
+		en = 1
+	}
+	res, err := s.db.Exec(`INSERT INTO ntfy_topics (school, class_id, topic, enabled, created_by, created_at)
+		VALUES (?,?,?,?,?,?)`,
+		n.School, n.ClassID, n.Topic, en, n.CreatedBy, time.Now().Unix())
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// ListNtfyTopics returns ntfy topic subscriptions for a school (or all when school is "").
+func (s *Store) ListNtfyTopics(school string) ([]*NtfyTopic, error) {
+	q := `SELECT id, school, class_id, topic, enabled, created_by, created_at FROM ntfy_topics`
+	var args []any
+	if school != "" {
+		q += ` WHERE school=?`
+		args = append(args, school)
+	}
+	q += ` ORDER BY id`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*NtfyTopic
+	for rows.Next() {
+		var n NtfyTopic
+		var en, ca int64
+		if err := rows.Scan(&n.ID, &n.School, &n.ClassID, &n.Topic, &en, &n.CreatedBy, &ca); err != nil {
+			return nil, err
+		}
+		n.Enabled, n.CreatedAt = en != 0, time.Unix(ca, 0)
+		out = append(out, &n)
+	}
+	return out, rows.Err()
+}
+
+// DeleteNtfyTopic removes an ntfy topic subscription by id.
+func (s *Store) DeleteNtfyTopic(id int64) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM ntfy_topics WHERE id=?`, id)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // PermRow is a single row in the perms table.
 type PermRow struct {
 	Username string
@@ -587,23 +863,23 @@ func (s *Store) AllPerms() ([]PermRow, error) {
 // SaveReconElements replaces the persisted teacher/room/subject set with the
 // given types->id map. It is written on shutdown so a later boot can answer
 // reconstruction requests before the background scan revalidates.
-func (s *Store) SaveReconElements(elems map[string][]int64) error {
+func (s *Store) SaveReconElements(school string, elems map[string][]int64) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM recon_elements`); err != nil {
+	if _, err := tx.Exec(`DELETE FROM recon_elements WHERE school=?`, school); err != nil {
 		tx.Rollback()
 		return err
 	}
-	ins, err := tx.Prepare(`INSERT INTO recon_elements (el_type, el_id) VALUES (?,?)`)
+	ins, err := tx.Prepare(`INSERT INTO recon_elements (school, el_type, el_id) VALUES (?,?,?)`)
 	if err != nil {
 		tx.Rollback()
 		return err
 	}
 	for t, ids := range elems {
 		for _, id := range ids {
-			if _, err := ins.Exec(t, id); err != nil {
+			if _, err := ins.Exec(school, t, id); err != nil {
 				ins.Close()
 				tx.Rollback()
 				return err
@@ -615,9 +891,9 @@ func (s *Store) SaveReconElements(elems map[string][]int64) error {
 }
 
 // LoadReconElements returns the persisted teacher/room/subject set as
-// type -> [ids].
-func (s *Store) LoadReconElements() (map[string][]int64, error) {
-	rows, err := s.db.Query(`SELECT el_type, el_id FROM recon_elements`)
+// type -> [ids] for a school (rows with an unrecorded school match any).
+func (s *Store) LoadReconElements(school string) (map[string][]int64, error) {
+	rows, err := s.db.Query(`SELECT el_type, el_id FROM recon_elements WHERE school=? OR school=''`, school)
 	if err != nil {
 		return nil, err
 	}
@@ -662,9 +938,13 @@ func (s *Store) UpsertUser(u *User) error {
 			return err
 		}
 	}
+	admin := 0
+	if u.Admin {
+		admin = 1
+	}
 	_, err = s.db.Exec(`INSERT INTO users
-		(username, password, method, person_id, person_type, class_id, class_name, email, display_name, created_at, last_seen)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?)
+		(username, password, method, person_id, person_type, class_id, class_name, email, display_name, created_at, last_seen, school, admin)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(username) DO UPDATE SET
 			password=excluded.password,
 			method=excluded.method,
@@ -674,10 +954,19 @@ func (s *Store) UpsertUser(u *User) error {
 			class_name=excluded.class_name,
 			email=excluded.email,
 			display_name=excluded.display_name,
+			school=excluded.school,
+			admin=excluded.admin,
 			last_seen=excluded.last_seen`,
 		u.Username, u.Password, u.Method, u.PersonID, u.PersonType,
 		u.ClassID, u.ClassName, u.Email, u.DisplayName,
-		u.CreatedAt.Unix(), now.Unix())
+		u.CreatedAt.Unix(), now.Unix(), u.School, admin)
+	return err
+}
+
+// SetDefaultSchool backfills users whose school has not been recorded yet
+// (pre-multi-school rows) with the given default school.
+func (s *Store) SetDefaultSchool(school string) error {
+	_, err := s.db.Exec(`UPDATE users SET school=? WHERE school=''`, school)
 	return err
 }
 
@@ -688,20 +977,24 @@ func (s *Store) Touch(username string) error {
 
 func (s *Store) GetUser(username string) (*User, error) {
 	return s.scanUser(s.db.QueryRow(
-		`SELECT id,username,password,method,person_id,person_type,class_id,class_name,email,display_name,created_at,last_seen FROM users WHERE username=?`,
+		`SELECT `+userCols+` FROM users WHERE username=?`,
 		norm(username)))
 }
 
 // UserByPersonID returns a user with the given person id, preferring the most
 // recently active one.
 func (s *Store) UserByPersonID(personID int64) (*User, error) {
-	return s.scanUser(s.db.QueryRow(`SELECT id,username,password,method,person_id,person_type,class_id,class_name,email,display_name,created_at,last_seen
+	return s.scanUser(s.db.QueryRow(`SELECT `+userCols+`
 		FROM users WHERE person_id=? ORDER BY last_seen DESC, id DESC LIMIT 1`, personID))
 }
 
-func (s *Store) Pool() ([]Class, error) {
+// Pool returns the pooled classes for a school: every class whose users belong
+// to the given school (or whose school has not been recorded, a pre-multi-
+// school account, treated as matching any school). Empty school matches all.
+func (s *Store) Pool(school string) ([]Class, error) {
 	rows, err := s.db.Query(`SELECT class_id, COALESCE(MAX(class_name),'') AS name
-		FROM users WHERE class_id > 0 GROUP BY class_id ORDER BY class_id`)
+		FROM users WHERE class_id > 0 AND (school=? OR school='')
+		GROUP BY class_id ORDER BY class_id`, school)
 	if err != nil {
 		return nil, err
 	}
@@ -723,25 +1016,27 @@ func (s *Store) UserCount() (int, error) {
 	return n, err
 }
 
-func (s *Store) PoolContains(classID int64) (bool, error) {
+func (s *Store) PoolContains(school string, classID int64) (bool, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE class_id=?`, classID).Scan(&n)
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE class_id=? AND (school=? OR school='')`, classID, school).Scan(&n)
 	return n > 0, err
 }
 
 // OwnerForClass returns the most recently active user in the given class,
 // preferring accounts that can be replayed (password or key with secret).
-func (s *Store) OwnerForClass(classID int64) (*User, error) {
-	return s.scanUser(s.db.QueryRow(`SELECT id,username,password,method,person_id,person_type,class_id,class_name,email,display_name,created_at,last_seen
-		FROM users WHERE class_id=? AND password<>'' ORDER BY last_seen DESC, id DESC LIMIT 1`, classID))
+func (s *Store) OwnerForClass(school string, classID int64) (*User, error) {
+	return s.scanUser(s.db.QueryRow(`SELECT `+userCols+`
+		FROM users WHERE class_id=? AND (school=? OR school='') AND password<>''
+		ORDER BY last_seen DESC, id DESC LIMIT 1`, classID, school))
 }
 
 // BoostedSourceAccounts returns all users with replayable secrets (password <> ”)
 // who are non-students (person_type != 5). These are the "teacher accounts
 // lying around" that a boosted user draws raw data from.
-func (s *Store) BoostedSourceAccounts() ([]*User, error) {
-	rows, err := s.db.Query(`SELECT id,username,password,method,person_id,person_type,class_id,class_name,email,display_name,created_at,last_seen
-		FROM users WHERE password<>'' AND person_type<>5 ORDER BY last_seen DESC`)
+func (s *Store) BoostedSourceAccounts(school string) ([]*User, error) {
+	rows, err := s.db.Query(`SELECT `+userCols+`
+		FROM users WHERE password<>'' AND person_type<>5 AND (school=? OR school='')
+		ORDER BY last_seen DESC`, school)
 	if err != nil {
 		return nil, err
 	}
@@ -757,15 +1052,14 @@ func (s *Store) BoostedSourceAccounts() ([]*User, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) AnyUser() (*User, error) {
-	return s.scanUser(s.db.QueryRow(`SELECT id,username,password,method,person_id,person_type,class_id,class_name,email,display_name,created_at,last_seen
-		FROM users ORDER BY last_seen DESC, id DESC LIMIT 1`))
+func (s *Store) AnyUser(school string) (*User, error) {
+	return s.scanUser(s.db.QueryRow(`SELECT `+userCols+`
+		FROM users WHERE school=? OR school='' ORDER BY last_seen DESC, id DESC LIMIT 1`, school))
 }
 
 // ListUsers returns every account, most recently seen first.
 func (s *Store) ListUsers() ([]*User, error) {
-	rows, err := s.db.Query(`SELECT id,username,password,method,person_id,person_type,class_id,class_name,email,display_name,created_at,last_seen
-		FROM users ORDER BY last_seen DESC, id DESC`)
+	rows, err := s.db.Query(`SELECT ` + userCols + ` FROM users ORDER BY last_seen DESC, id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -829,14 +1123,16 @@ func (s *Store) DeleteUser(username string) (int64, error) {
 func (s *Store) scanUser(row *sql.Row) (*User, error) {
 	var u User
 	var ca, ls int64
+	var admin int
 	err := row.Scan(&u.ID, &u.Username, &u.Password, &u.Method, &u.PersonID, &u.PersonType,
-		&u.ClassID, &u.ClassName, &u.Email, &u.DisplayName, &ca, &ls)
+		&u.ClassID, &u.ClassName, &u.Email, &u.DisplayName, &ca, &ls, &u.School, &admin)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	u.Admin = admin != 0
 	u.CreatedAt = time.Unix(ca, 0)
 	u.LastSeen = time.Unix(ls, 0)
 	return &u, nil
@@ -846,11 +1142,13 @@ func (s *Store) scanUser(row *sql.Row) (*User, error) {
 func (s *Store) scanUserRow(row *sql.Rows) (*User, error) {
 	var u User
 	var ca, ls int64
+	var admin int
 	err := row.Scan(&u.ID, &u.Username, &u.Password, &u.Method, &u.PersonID, &u.PersonType,
-		&u.ClassID, &u.ClassName, &u.Email, &u.DisplayName, &ca, &ls)
+		&u.ClassID, &u.ClassName, &u.Email, &u.DisplayName, &ca, &ls, &u.School, &admin)
 	if err != nil {
 		return nil, err
 	}
+	u.Admin = admin != 0
 	u.CreatedAt = time.Unix(ca, 0)
 	u.LastSeen = time.Unix(ls, 0)
 	return &u, nil
@@ -949,7 +1247,7 @@ func (s *Store) TouchClassToken(token string, at int64) error {
 // SaveMasterNames persists element names from the upstream master data fetch.
 // It updates the name column in recon_elements for matching IDs, inserting new
 // rows only if they don't already exist.
-func (s *Store) SaveMasterNames(elType string, names map[int64]string) error {
+func (s *Store) SaveMasterNames(school, elType string, names map[int64]string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -957,8 +1255,8 @@ func (s *Store) SaveMasterNames(elType string, names map[int64]string) error {
 	defer tx.Rollback()
 	for id, name := range names {
 		// Upsert: insert if missing, then update name
-		_, _ = tx.Exec(`INSERT OR IGNORE INTO recon_elements (el_type, el_id, name) VALUES (?,?,?)`, elType, id, name)
-		_, _ = tx.Exec(`UPDATE recon_elements SET name=? WHERE el_type=? AND el_id=?`, name, elType, id)
+		_, _ = tx.Exec(`INSERT OR IGNORE INTO recon_elements (school, el_type, el_id, name) VALUES (?,?,?,?)`, school, elType, id, name)
+		_, _ = tx.Exec(`UPDATE recon_elements SET name=? WHERE school=? AND el_type=? AND el_id=?`, name, school, elType, id)
 	}
 	return tx.Commit()
 }
@@ -970,14 +1268,16 @@ func (s *Store) SaveMasterNames(elType string, names map[int64]string) error {
 //   - unique substring match → returned
 //   - multiple matches → error with candidates listed
 //   - no match → error with closest Levenshtein suggestions
-func (s *Store) LookupElement(elType, input string) (int64, error) {
+//
+// Rows from unrecorded-school entries (school=”) match any school.
+func (s *Store) LookupElement(school, elType, input string) (int64, error) {
 	// Pure numeric → use directly
 	if id, ok := parseID(input); ok {
 		return id, nil
 	}
 
 	// Fetch all elements of this type with names
-	rows, err := s.db.Query(`SELECT el_id, name FROM recon_elements WHERE el_type=? AND name!=''`, elType)
+	rows, err := s.db.Query(`SELECT el_id, name FROM recon_elements WHERE el_type=? AND (school=? OR school='') AND name!=''`, elType, school)
 	if err != nil {
 		return 0, err
 	}
